@@ -1,0 +1,63 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Monitor — Docker Compose (k3s embedded)
+# Acesso após deploy: http://localhost:8080
+# Kubernetes API:     https://localhost:6443
+# Deploy:             ./deploy.sh
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Registro local de imagens ──────────────────────────────────────────────
+  registry:
+    image: registry:2
+    container_name: pm-registry
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    networks:
+      - pm-net
+
+  # ── Kubernetes (k3s) ───────────────────────────────────────────────────────
+  k3s:
+    image: rancher/k3s:v1.29.3-k3s1
+    container_name: pm-k3s
+    restart: unless-stopped
+    privileged: true
+    command: >
+      server
+      --disable=traefik
+      --write-kubeconfig-mode=644
+      --tls-san=localhost
+      --tls-san=k3s
+    environment:
+      - K3S_TOKEN=pod-monitor-cluster-token
+    volumes:
+      - k3s-data:/var/lib/rancher/k3s
+      - k3s-etc:/etc/rancher/k3s
+      - ./k3s-registries.yaml:/etc/rancher/k3s/registries.yaml:ro
+      # Opcional: expor o socket Docker do host para monitoramento externo
+      # - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "6443:6443"   # Kubernetes API
+      - "8080:30080"  # Pod Monitor frontend (NodePort)
+    networks:
+      - pm-net
+    healthcheck:
+      test: ["CMD-SHELL", "kubectl get nodes 2>/dev/null | grep -q ' Ready'"]
+      interval: 15s
+      timeout: 10s
+      retries: 24
+      start_period: 40s
+
+volumes:
+  registry-data:
+  k3s-data:
+  k3s-etc:
+
+networks:
+  pm-net:
+    driver: bridge

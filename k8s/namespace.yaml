@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pod-monitor
+  labels:
+    # enforce=baseline: bloqueia escalonamento de privilégios conhecido (hostPID, hostNet, containers privilegiados)
+    # warn+audit=restricted: gera avisos/logs para violações do nível mais restritivo, sem bloquear
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

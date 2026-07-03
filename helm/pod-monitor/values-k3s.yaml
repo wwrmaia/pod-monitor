@@ -1,0 +1,39 @@
+# k3s
+# Traefik e instalado por padrao. Para usar nginx: --set ingress.className=nginx
+# StorageClass padrao do k3s: local-path
+
+image:
+  registry: ""
+  pullPolicy: IfNotPresent   # use Never se importar imagens manualmente com: sudo k3s ctr images import image.tar
+
+backend:
+  # JWT Secret — crie o secret antes do deploy:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n pod-monitor
+  jwtSecret:
+    existingSecret: "pod-monitor-secrets"
+    secretKey: "jwt-secret"
+
+  # Docker/Podman externo (opcional)
+  # docker:
+  #   enabled: true
+  #   hosts: "node=/var/run/docker.sock"
+  #   sockets:
+  #     - name: docker-sock
+  #       hostPath: /var/run/docker.sock
+  #       mountPath: /var/run/docker.sock
+
+ingress:
+  enabled: true
+  className: traefik
+  host: pod-monitor.local
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+
+storage:
+  className: local-path
+
+frontend:
+  service:
+    type: ClusterIP

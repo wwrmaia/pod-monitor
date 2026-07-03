@@ -1,0 +1,1 @@
+{{- /* PostgreSQL PVC is managed by templates/postgres.yaml */ -}}

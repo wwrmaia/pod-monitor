@@ -1,0 +1,52 @@
+# EKS (Amazon Elastic Kubernetes Service)
+# Requer: nginx ingress controller instalado no cluster
+#   helm install ingress-nginx ingress-nginx/ingress-nginx --namespace ingress-nginx --create-namespace
+# Ou use AWS Load Balancer Controller com className: alb
+#
+# Imagens no Amazon ECR:
+#   aws ecr get-login-password | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com
+#   docker tag pod-monitor-backend:latest <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/pod-monitor-backend:latest
+#   docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/pod-monitor-backend:latest
+# Autenticacao via IRSA (IAM Roles for Service Accounts) ou imagePullSecrets com token ECR.
+
+image:
+  registry: "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com"  # substitua pelos seus valores
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+  # Para ECR com token temporario (expira em 12h):
+  # pullSecrets:
+  #   - name: ecr-registry-secret
+
+backend:
+  # JWT Secret — crie o secret antes do deploy:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n pod-monitor
+  jwtSecret:
+    existingSecret: "pod-monitor-secrets"
+    secretKey: "jwt-secret"
+
+  # Docker/Podman externo (opcional)
+  # docker:
+  #   enabled: true
+  #   hosts: "node=/var/run/docker.sock"
+  #   sockets:
+  #     - name: docker-sock
+  #       hostPath: /var/run/docker.sock
+  #       mountPath: /var/run/docker.sock
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pod-monitor.example.com   # substitua pelo seu dominio
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  tls: []
+
+storage:
+  className: gp2    # use "gp3" em regioes com suporte; instale o EBS CSI driver se necessario
+  size: 5Gi
+
+frontend:
+  service:
+    type: ClusterIP

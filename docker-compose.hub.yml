@@ -1,0 +1,78 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Monitor — instalação via Docker Hub (sem build local)
+#
+# Pré-requisitos na máquina destino:
+#   - Docker + Docker Compose instalados
+#   - kubeconfig com acesso ao cluster (~/.kube/config ou via KUBECONFIG)
+#
+# Uso:
+#   docker compose -f docker-compose.hub.yml up -d
+#
+# Acesso:
+#   http://localhost:3000
+#
+# Variáveis de ambiente opcionais (arquivo .env na mesma pasta):
+#   JWT_SECRET=sua_chave_secreta          # padrão: gerado aleatoriamente
+#   ADMIN_PASSWORD_HASH=hash_bcrypt       # hash bcrypt da senha admin
+#
+# Para monitorar clusters Kubernetes, adicione-os via interface de admin após subir.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pod-monitor-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-podmonitor}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_DB=${POSTGRES_DB:-podmonitor}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-podmonitor}", "-d", "${POSTGRES_DB:-podmonitor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  backend:
+    image: wwrmaia/pod-monitor-backend:latest
+    container_name: pod-monitor-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-podmonitor}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-podmonitor}?sslmode=disable
+      - KUBECONFIG=/data/kubeconfig
+      - JWT_SECRET=${JWT_SECRET:-pod-monitor-secret-change-me}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
+    volumes:
+      - backend-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    image: wwrmaia/pod-monitor-frontend:latest
+    container_name: pod-monitor-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - BACKEND_HOST=backend
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  backend-data:

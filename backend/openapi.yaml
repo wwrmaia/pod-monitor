@@ -1,0 +1,1260 @@
+openapi: "3.0.3"
+info:
+  title: Pod Monitor API
+  version: "1.0.0"
+  description: |
+    API do Pod Monitor — dashboard de monitoramento de recursos Kubernetes.
+
+    **Autenticação:** JWT Bearer token obtido via `POST /api/auth/login`.
+    Inclua o header `Authorization: Bearer <token>` em todas as requisições autenticadas.
+
+    **Roles:**
+    - `administration` — acesso total
+    - `reader` — leitura de recursos do cluster
+    - `dev` — acesso restrito a clusters/namespaces permitidos
+
+servers:
+  - url: /
+    description: Servidor local
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        mfa_required: { type: boolean }
+        mfa_token: { type: string }
+
+    ContainerResources:
+      type: object
+      properties:
+        name:           { type: string }
+        image:          { type: string }
+        cpu_request:    { type: string }
+        memory_request: { type: string }
+        cpu_limit:      { type: string }
+        memory_limit:   { type: string }
+        cpu_usage:      { type: string }
+        memory_usage:   { type: string }
+
+    PodResources:
+      type: object
+      properties:
+        pod:        { type: string }
+        namespace:  { type: string }
+        node:       { type: string }
+        phase:      { type: string }
+        containers:
+          type: array
+          items: { $ref: '#/components/schemas/ContainerResources' }
+
+    PagedPodResources:
+      type: object
+      properties:
+        items:       { type: array, items: { $ref: '#/components/schemas/PodResources' } }
+        total:       { type: integer }
+        page:        { type: integer }
+        page_size:   { type: integer }
+        total_pages: { type: integer }
+
+    NodeResources:
+      type: object
+      properties:
+        name:            { type: string }
+        status:          { type: string, enum: [Ready, NotReady] }
+        role:            { type: string }
+        cpu_allocatable: { type: string }
+        mem_allocatable: { type: string }
+        cpu_usage:       { type: string }
+        mem_usage:       { type: string }
+
+    PagedNodeResources:
+      type: object
+      properties:
+        items:       { type: array, items: { $ref: '#/components/schemas/NodeResources' } }
+        total:       { type: integer }
+        page:        { type: integer }
+        page_size:   { type: integer }
+        total_pages: { type: integer }
+
+    HistoryRecord:
+      type: object
+      properties:
+        session_id:     { type: string }
+        captured_at:    { type: string, format: date-time }
+        cluster:        { type: string }
+        pod:            { type: string }
+        namespace:      { type: string }
+        node:           { type: string }
+        container:      { type: string }
+        cpu_request:    { type: string }
+        memory_request: { type: string }
+        cpu_limit:      { type: string }
+        memory_limit:   { type: string }
+        cpu_usage:      { type: string }
+        memory_usage:   { type: string }
+
+    DashSummary:
+      type: object
+      properties:
+        total_pods:     { type: integer }
+        running_pods:   { type: integer }
+        pending_pods:   { type: integer }
+        failed_pods:    { type: integer }
+        total_nodes:    { type: integer }
+        ready_nodes:    { type: integer }
+        alerts:
+          type: object
+          properties:
+            critical: { type: integer }
+            warning:  { type: integer }
+
+    AuditEntry:
+      type: object
+      properties:
+        id:        { type: integer }
+        timestamp: { type: string, format: date-time }
+        username:  { type: string }
+        role:      { type: string }
+        action:    { type: string }
+        detail:    { type: string }
+        ip:        { type: string }
+
+    WebhookConfig:
+      type: object
+      properties:
+        id:      { type: integer }
+        name:    { type: string }
+        url:     { type: string }
+        events:  { type: string, description: "Comma-separated event types, or '*' for all" }
+        enabled: { type: boolean }
+
+    User:
+      type: object
+      properties:
+        username:   { type: string }
+        role:       { type: string, enum: [administration, reader, dev] }
+        group_name: { type: string }
+        totp_enabled: { type: boolean }
+
+    Group:
+      type: object
+      properties:
+        name:        { type: string }
+        role:        { type: string }
+        totp_enabled: { type: boolean }
+        members:     { type: array, items: { type: string } }
+
+    PVCInfo:
+      type: object
+      properties:
+        namespace:     { type: string }
+        name:          { type: string }
+        capacity:      { type: string }
+        status:        { type: string }
+        storage_class: { type: string }
+        volume:        { type: string }
+        access_modes:  { type: string }
+
+    HealthStatus:
+      type: object
+      properties:
+        status:   { type: string, enum: [ok, degraded] }
+        db:       { type: string }
+        clusters: { type: integer }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      description: Verifica conectividade com o banco de dados e número de clusters registrados.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Serviço saudável
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+        "503":
+          description: Serviço degradado (DB inacessível)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+
+  /openapi.yaml:
+    get:
+      summary: Spec OpenAPI 3.0
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Arquivo YAML da spec
+          content:
+            application/yaml:
+              schema: { type: string }
+
+  /docs:
+    get:
+      summary: Swagger UI
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Interface Swagger UI
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+  /api/auth/login:
+    post:
+      summary: Autenticar usuário
+      security: []
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        "200":
+          description: Login bem-sucedido ou MFA requerido
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        "401":
+          description: Credenciais inválidas
+        "429":
+          description: Rate limit atingido (10 tentativas / 5 min por IP)
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Segundos até desbloquear
+
+  /api/auth/logout:
+    post:
+      summary: Revogar token JWT atual
+      tags: [Auth]
+      responses:
+        "200":
+          description: Token revogado
+
+  /api/auth/mfa/validate:
+    post:
+      summary: Validar código TOTP (segunda etapa do login)
+      security: []
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string }
+                code:      { type: string, description: "Código TOTP de 6 dígitos" }
+      responses:
+        "200":
+          description: MFA válido, retorna JWT final
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        "401":
+          description: Código inválido ou expirado
+
+  /api/auth/mfa/setup:
+    get:
+      summary: Obter QR code para configuração de TOTP
+      tags: [Auth]
+      responses:
+        "200":
+          description: QR code em PNG (base64) e URL TOTP
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  qr_code: { type: string, format: byte }
+                  totp_url: { type: string }
+
+  /api/auth/mfa/setup/confirm:
+    post:
+      summary: Confirmar ativação de TOTP com primeiro código
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: MFA ativado com sucesso
+
+  /api/auth/mfa/reset-user:
+    post:
+      summary: Resetar MFA de outro usuário (admin)
+      tags: [Auth, Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string }
+      responses:
+        "200":
+          description: MFA resetado
+
+  # ── Users ───────────────────────────────────────────────────────────────────
+  /api/auth/users:
+    get:
+      summary: Listar usuários (admin)
+      tags: [Admin]
+      responses:
+        "200":
+          description: Lista de usuários
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+
+  /api/auth/users/create:
+    post:
+      summary: Criar usuário (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username:   { type: string }
+                password:   { type: string }
+                role:       { type: string, enum: [administration, reader, dev] }
+                group_name: { type: string }
+      responses:
+        "200":
+          description: Usuário criado
+        "409":
+          description: Usuário já existe
+
+  /api/auth/users/delete:
+    delete:
+      summary: Excluir usuário (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string }
+      responses:
+        "200":
+          description: Usuário excluído
+
+  /api/auth/users/password:
+    post:
+      summary: Alterar senha de usuário (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Senha alterada
+
+  /api/auth/users/role:
+    post:
+      summary: Alterar role de usuário (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, role]
+              properties:
+                username: { type: string }
+                role:     { type: string, enum: [administration, reader, dev] }
+      responses:
+        "200":
+          description: Role atualizado
+
+  /api/auth/users/dev-access:
+    post:
+      summary: Atualizar clusters/namespaces permitidos para usuário dev (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:           { type: string }
+                allowed_clusters:   { type: array, items: { type: string } }
+                allowed_namespaces: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Acesso atualizado
+
+  /api/auth/mfa/toggle:
+    post:
+      summary: Habilitar ou desabilitar MFA para usuário (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, enabled]
+              properties:
+                username: { type: string }
+                enabled:  { type: boolean }
+      responses:
+        "200":
+          description: MFA atualizado
+
+  # ── Groups ──────────────────────────────────────────────────────────────────
+  /api/auth/groups:
+    get:
+      summary: Listar grupos (admin)
+      tags: [Admin]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+
+  /api/auth/groups/create:
+    post:
+      summary: Criar grupo (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              properties:
+                name: { type: string }
+                role: { type: string }
+      responses:
+        "200":
+          description: Grupo criado
+
+  /api/auth/groups/delete:
+    delete:
+      summary: Excluir grupo (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: Grupo excluído
+
+  /api/auth/groups/access:
+    post:
+      summary: Atualizar acesso de grupo (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:               { type: string }
+                allowed_clusters:   { type: array, items: { type: string } }
+                allowed_namespaces: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Acesso atualizado
+
+  /api/auth/groups/mfa:
+    post:
+      summary: Configurar MFA obrigatório para grupo (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, totp_enabled]
+              properties:
+                name:         { type: string }
+                totp_enabled: { type: boolean }
+      responses:
+        "200":
+          description: MFA do grupo atualizado
+
+  /api/auth/groups/members:
+    post:
+      summary: Adicionar/remover membros de grupo (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:    { type: string }
+                add:     { type: array, items: { type: string } }
+                remove:  { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Membros atualizados
+
+  # ── Clusters & Namespaces ───────────────────────────────────────────────────
+  /api/clusters:
+    get:
+      summary: Listar clusters monitorados
+      tags: [Clusters]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:   { type: string }
+                    active: { type: boolean }
+
+  /api/namespaces:
+    get:
+      summary: Listar namespaces de um cluster
+      tags: [Clusters]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+
+  # ── Resources ───────────────────────────────────────────────────────────────
+  /api/resources:
+    get:
+      summary: Listar pods com recursos (requests, limits, uso atual)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+        - in: query
+          name: page
+          description: "Número da página (ativa paginação, base 1)"
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: page_size
+          description: "Itens por página (padrão: 100, máx: 500)"
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: |
+            Sem `page`: array de PodResources.
+            Com `page`: objeto paginado PagedPodResources.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: { $ref: '#/components/schemas/PodResources' }
+                  - $ref: '#/components/schemas/PagedPodResources'
+
+  /api/nodes:
+    get:
+      summary: Listar nós com recursos (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: page_size
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: { $ref: '#/components/schemas/NodeResources' }
+                  - $ref: '#/components/schemas/PagedNodeResources'
+
+  /api/storage:
+    get:
+      summary: Listar PVCs (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PVCInfo' }
+
+  /api/orphans:
+    get:
+      summary: Listar recursos órfãos / auditoria (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: exclude
+          description: "Namespaces a excluir, separados por vírgula"
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                description: OrphanReport com PVCs, ConfigMaps, Secrets, ServiceAccounts, Ingresses órfãs
+
+  /api/logs:
+    get:
+      summary: Obter logs de um container (dev/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          required: true
+          schema: { type: string }
+        - in: query
+          name: pod
+          required: true
+          schema: { type: string }
+        - in: query
+          name: container
+          schema: { type: string }
+        - in: query
+          name: lines
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs: { type: string }
+
+  /api/analysis:
+    get:
+      summary: Análise de otimização de recursos (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  description: Recomendação de ajuste de requests/limits por container
+
+  /api/quotas:
+    get:
+      summary: Listar ResourceQuotas e LimitRanges (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/topology:
+    get:
+      summary: Grafo de topologia do cluster (reader/admin)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes: { type: array, items: { type: object } }
+                  edges: { type: array, items: { type: object } }
+
+  # ── Docker / Containers ─────────────────────────────────────────────────────
+  /api/docker/hosts:
+    get:
+      summary: Listar hosts Docker/Podman monitorados (reader/admin)
+      tags: [Docker]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:    { type: string }
+                    addr:    { type: string }
+                    cluster: { type: boolean }
+
+  /api/docker/containers:
+    get:
+      summary: Listar containers Docker/Podman externos (reader/admin)
+      tags: [Docker]
+      parameters:
+        - in: query
+          name: host
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/containers:
+    get:
+      summary: Listar containers k8s via Docker API (reader/admin)
+      tags: [Docker]
+      parameters:
+        - in: query
+          name: host
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  # ── Helm ────────────────────────────────────────────────────────────────────
+  /api/helm/releases:
+    get:
+      summary: Listar Helm releases (reader/admin)
+      tags: [Helm]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/deployments:
+    get:
+      summary: Listar Deployments com status (reader/admin)
+      tags: [Helm]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  # ── History ─────────────────────────────────────────────────────────────────
+  /api/history:
+    get:
+      summary: Histórico de snapshots de recursos (reader/admin)
+      tags: [History]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 2000, maximum: 2000 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/HistoryRecord' }
+
+  /api/history/csv:
+    get:
+      summary: Exportar histórico em CSV (reader/admin)
+      tags: [History]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            text/csv:
+              schema: { type: string }
+
+  # ── Dashboard ───────────────────────────────────────────────────────────────
+  /api/dashboard/summary:
+    get:
+      summary: Resumo do cluster (contagens, alertas) para o dashboard
+      tags: [Dashboard]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashSummary' }
+
+  /api/dashboard/timeseries:
+    get:
+      summary: Timeseries de CPU/memória para widgets do dashboard
+      tags: [Dashboard]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+        - in: query
+          name: window
+          description: "Janela de tempo em ms (ex: 3600000 = 1h)"
+          schema: { type: integer }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    ts:     { type: string, format: date-time }
+                    cpu:    { type: number }
+                    memory: { type: number }
+
+  /api/dashboards:
+    get:
+      summary: Listar dashboards salvos do usuário
+      tags: [Dashboard]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:       { type: integer }
+                    name:     { type: string }
+                    username: { type: string }
+
+  /api/dashboards/save:
+    post:
+      summary: Salvar layout de dashboard
+      tags: [Dashboard]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, widgets]
+              properties:
+                name:    { type: string }
+                widgets: { type: string, description: "JSON serializado do layout" }
+      responses:
+        "200":
+          description: Dashboard salvo
+
+  /api/dashboards/delete:
+    delete:
+      summary: Excluir dashboard salvo
+      tags: [Dashboard]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer }
+      responses:
+        "200":
+          description: Dashboard excluído
+
+  # ── Admin ───────────────────────────────────────────────────────────────────
+  /api/admin/validate:
+    post:
+      summary: Validar kubeconfig (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kubeconfig]
+              properties:
+                kubeconfig: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contexts: { type: array, items: { type: string } }
+
+  /api/admin/apply:
+    post:
+      summary: Aplicar kubeconfig e registrar clusters (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kubeconfig]
+              properties:
+                kubeconfig: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:  { type: string }
+                  clusters: { type: array, items: { type: string } }
+
+  /api/admin/create-sa:
+    post:
+      summary: Criar ServiceAccount de leitura no cluster (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: ServiceAccount criado
+
+  /api/admin/docker-host:
+    post:
+      summary: Adicionar host Docker/Podman para monitoramento (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, addr]
+              properties:
+                name: { type: string }
+                addr: { type: string, description: "Caminho Unix socket ou tcp://host:port" }
+      responses:
+        "200":
+          description: Host adicionado
+
+  /api/admin/cluster/delete:
+    delete:
+      summary: Remover cluster do monitoramento (admin)
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, password]
+              properties:
+                name:     { type: string }
+                password: { type: string, description: "Senha do admin para confirmar" }
+      responses:
+        "200":
+          description: Cluster removido
+        "401":
+          description: Senha incorreta
+
+  # ── Audit & Webhooks ────────────────────────────────────────────────────────
+  /api/audit:
+    get:
+      summary: Listar entradas do audit log (admin)
+      tags: [Audit]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 200, maximum: 1000 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+
+  /api/webhooks:
+    get:
+      summary: Listar webhooks configurados (admin)
+      tags: [Audit]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookConfig' }
+    post:
+      summary: Criar ou atualizar webhook (admin)
+      tags: [Audit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookConfig' }
+      responses:
+        "200":
+          description: Webhook salvo
+    delete:
+      summary: Excluir webhook (admin)
+      tags: [Audit]
+      parameters:
+        - in: query
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Webhook excluído
+
+  /api/webhooks/test:
+    post:
+      summary: Disparar webhook de teste (admin)
+      tags: [Audit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+      responses:
+        "200":
+          description: Resultado do teste
+
+  /api/thresholds:
+    get:
+      summary: Listar thresholds de alerta (admin)
+      tags: [Audit]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:        { type: integer }
+                    cluster:   { type: string }
+                    namespace: { type: string }
+                    warn_pct:  { type: integer }
+                    crit_pct:  { type: integer }
+    post:
+      summary: Criar ou atualizar threshold de alerta (admin)
+      tags: [Audit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warn_pct, crit_pct]
+              properties:
+                cluster:   { type: string }
+                namespace: { type: string }
+                warn_pct:  { type: integer, minimum: 1, maximum: 99 }
+                crit_pct:  { type: integer, minimum: 1, maximum: 99 }
+      responses:
+        "200":
+          description: Threshold salvo
+    delete:
+      summary: Excluir threshold de alerta (admin)
+      tags: [Audit]
+      parameters:
+        - in: query
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Threshold excluído
+
+  # ── SSE ─────────────────────────────────────────────────────────────────────
+  /api/sse/events:
+    get:
+      summary: Server-Sent Events — notificações em tempo real
+      tags: [SSE]
+      description: |
+        Eventos emitidos:
+        - `alert` — alerta crítico/warning detectado
+        - `topology_refresh` — topologia atualizada
+        - `ping` — keepalive a cada 30s
+      responses:
+        "200":
+          description: Stream de eventos SSE
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+tags:
+  - name: Health
+    description: Endpoints de saúde e documentação
+  - name: Auth
+    description: Autenticação e MFA
+  - name: Admin
+    description: Administração de usuários, grupos e clusters (role administration)
+  - name: Clusters
+    description: Clusters e namespaces disponíveis
+  - name: Resources
+    description: Pods, nós, storage, logs e análise de recursos
+  - name: Docker
+    description: Monitoramento de containers Docker/Podman externos
+  - name: Helm
+    description: Helm releases e Deployments
+  - name: History
+    description: Histórico de snapshots de recursos
+  - name: Dashboard
+    description: Resumo, timeseries e layouts de dashboard
+  - name: Audit
+    description: Audit log, webhooks e thresholds de alerta
+  - name: SSE
+    description: Notificações em tempo real via Server-Sent Events

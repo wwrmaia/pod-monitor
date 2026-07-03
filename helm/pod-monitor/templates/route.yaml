@@ -1,0 +1,47 @@
+{{- if .Values.openshift.enabled }}
+# OpenShift Route for the frontend (/)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: pod-monitor-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pod-monitor.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.openshift.route.host }}
+  host: {{ .Values.openshift.route.host }}
+  {{- end }}
+  path: /
+  to:
+    kind: Service
+    name: frontend-svc
+  port:
+    targetPort: 80
+  {{- if .Values.openshift.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshift.route.tls.termination }}
+  {{- end }}
+---
+# OpenShift Route for the backend API (/api)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: pod-monitor-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pod-monitor.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.openshift.route.host }}
+  host: {{ .Values.openshift.route.host }}
+  {{- end }}
+  path: /api
+  to:
+    kind: Service
+    name: backend-svc
+  port:
+    targetPort: 8080
+  {{- if .Values.openshift.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshift.route.tls.termination }}
+  {{- end }}
+{{- end }}

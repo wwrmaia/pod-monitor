@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: pod-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: pod-monitor-sa
+      volumes:
+        # ── Docker socket — montado APENAS no sidecar docker-socket-proxy ──────
+        # O sidecar expõe uma API Docker somente-leitura em tcp://localhost:2375.
+        # O container principal do backend NUNCA monta o socket diretamente,
+        # eliminando o risco de escalação de privilégios via docker.sock.
+        #
+        # Se não usar monitoramento Docker, remova:
+        #   - este volume, o sidecar abaixo e a env DOCKER_HOSTS do backend.
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+        - name: podman-sock
+          hostPath:
+            path: /run/podman/podman.sock
+        - name: kubeconfig
+          secret:
+            secretName: pod-monitor-kubeconfig
+            optional: true
+      containers:
+        # ── Container principal ──────────────────────────────────────────────
+        - name: backend
+          image: pod-monitor-backend:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: DATABASE_URL
+            - name: KUBECONFIG
+              value: /etc/kubeconfig/config
+            # O sidecar docker-socket-proxy expõe o Docker em localhost:2375
+            # (somente leitura: version + containers + stats).
+            # Para Podman, mantém o socket direto (ou adicione outro sidecar proxy).
+            - name: DOCKER_HOSTS
+              value: "minikube-node=tcp://localhost:2375,podman=/run/podman/podman.sock"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pod-monitor-secrets
+                  key: jwt-secret
+          volumeMounts:
+            # docker.sock NÃO está montado aqui — acesso via sidecar tcp://localhost:2375
+            - name: podman-sock
+              mountPath: /run/podman/podman.sock
+            - name: kubeconfig
+              mountPath: /etc/kubeconfig
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+        # ── Sidecar: Docker Socket Proxy ─────────────────────────────────────
+        # Expõe apenas os endpoints Docker necessários (somente leitura).
+        # O container backend acessa via tcp://localhost:2375.
+        # Imagem: ghcr.io/tecnologias/docker-socket-proxy (verificar versão atual)
+        # Documentação: https://github.com/Tecnologias/docker-socket-proxy
+        - name: docker-socket-proxy
+          image: ghcr.io/tecnativa/docker-socket-proxy:edge
+          env:
+            # Endpoints permitidos (leitura)
+            - name: VERSION
+              value: "1"       # GET /version — detecção de API version
+            - name: CONTAINERS
+              value: "1"       # GET /containers/json e /containers/{id}/stats
+            # Todos os demais endpoints bloqueados por padrão
+            - name: POST
+              value: "0"
+            - name: BUILD
+              value: "0"
+            - name: COMMIT
+              value: "0"
+            - name: EXEC
+              value: "0"
+            - name: IMAGES
+              value: "0"
+            - name: NETWORKS
+              value: "0"
+            - name: VOLUMES
+              value: "0"
+            - name: SECRETS
+              value: "0"
+            - name: SWARM
+              value: "0"
+          ports:
+            - containerPort: 2375
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+              readOnly: false   # O proxy precisa de acesso ao socket; restrição é feita via ACL interna
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            # readOnlyRootFilesystem não aplicado: haproxy precisa escrever haproxy.cfg no startup.
+            # A restrição de segurança é garantida pelos ACLs (apenas VERSION e CONTAINERS).
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-svc
+  namespace: pod-monitor
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080

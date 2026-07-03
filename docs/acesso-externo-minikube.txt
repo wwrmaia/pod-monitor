@@ -1,0 +1,171 @@
+================================================================================
+  EXPOR APLICAÇÃO DO MINIKUBE PARA ACESSO EXTERNO NA REDE
+  AlmaLinux (ou RHEL/Rocky Linux) + Minikube + firewalld
+================================================================================
+
+OBJETIVO
+--------
+Permitir que outras máquinas na rede acessem uma aplicação rodando no Minikube
+via NodePort, sem precisar de port-forward manual.
+
+PRÉ-REQUISITOS
+--------------
+- Minikube rodando com serviço NodePort configurado
+- socat instalado (sudo dnf install -y socat)
+- Acesso sudo na máquina host
+
+--------------------------------------------------------------------------------
+PASSO A PASSO
+--------------------------------------------------------------------------------
+
+1. DESCOBRIR OS IPs NECESSÁRIOS
+--------------------------------
+
+IP da máquina host na rede local:
+  ip addr show | grep "inet " | grep -v 127
+
+IP interno do Minikube:
+  minikube ip
+
+Porta NodePort do serviço:
+  kubectl get svc -n <namespace>
+  (coluna PORT(S), ex: 80:30080/TCP → porta 30080)
+
+
+2. INSTALAR O SOCAT
+--------------------
+
+  sudo dnf install -y socat
+
+
+3. CRIAR O SERVIÇO SYSTEMD
+---------------------------
+
+Substitua:
+  <MINIKUBE_IP>   → IP retornado por "minikube ip"       (ex: 192.168.49.2)
+  <PORTA_NODEPORT> → porta NodePort do serviço            (ex: 30080)
+
+  sudo tee /etc/systemd/system/meu-proxy.service << 'EOF'
+  [Unit]
+  Description=Proxy NodePort -> Minikube
+  After=network.target
+
+  [Service]
+  ExecStart=/usr/bin/socat TCP-LISTEN:<PORTA_NODEPORT>,fork,reuseaddr TCP:<MINIKUBE_IP>:<PORTA_NODEPORT>
+  Restart=always
+  RestartSec=3
+
+  [Install]
+  WantedBy=multi-user.target
+  EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now meu-proxy
+
+
+4. ABRIR A PORTA NO FIREWALL
+------------------------------
+
+  sudo firewall-cmd --permanent --add-port=<PORTA_NODEPORT>/tcp
+  sudo firewall-cmd --reload
+
+
+5. VERIFICAR SE ESTÁ FUNCIONANDO
+----------------------------------
+
+Verificar se socat está ouvindo:
+  ss -tlnp | grep <PORTA_NODEPORT>
+  (deve mostrar 0.0.0.0:<PORTA>)
+
+Testar localmente:
+  curl http://127.0.0.1:<PORTA_NODEPORT>
+
+Testar pelo IP da rede:
+  curl http://<IP_HOST>:<PORTA_NODEPORT>
+
+Acessar de outra máquina:
+  http://<IP_HOST>:<PORTA_NODEPORT>
+
+
+--------------------------------------------------------------------------------
+ATENÇÃO — ERROS COMUNS
+--------------------------------------------------------------------------------
+
+PROBLEMA: Conexão chega mas não responde (timeout externo, funciona local)
+CAUSA:    Regra "forward-port" do firewalld intercepta o tráfego antes do socat
+SOLUÇÃO:  Remover o forward-port se existir:
+
+  sudo firewall-cmd --list-all
+  (verificar se há algo em "forward-ports:")
+
+  sudo firewall-cmd --permanent --remove-forward-port=port=<PORTA>:proto=tcp:toport=<PORTA>:toaddr=<MINIKUBE_IP>
+  sudo firewall-cmd --reload
+
+
+PROBLEMA: Regras manuais de iptables conflitando com firewalld
+CAUSA:    Comandos "iptables -t nat" adicionados manualmente
+SOLUÇÃO:  Limpar a tabela NAT e recarregar firewalld:
+
+  sudo iptables -t nat -F
+  sudo iptables -t nat -X
+  sudo firewall-cmd --reload
+
+
+PROBLEMA: SELinux bloqueando o socat
+CAUSA:    Política SELinux restritiva
+SOLUÇÃO:  Criar política permissiva para a porta:
+
+  sudo semanage port -a -t http_port_t -p tcp <PORTA>
+
+
+--------------------------------------------------------------------------------
+DIAGNÓSTICO
+--------------------------------------------------------------------------------
+
+Ver se os pacotes chegam na interface de rede:
+  sudo tcpdump -i <INTERFACE> tcp port <PORTA>
+  (ex: sudo tcpdump -i wlp2s0 tcp port 30080)
+
+Se aparecerem pacotes [S] (SYN) mas sem resposta [S.] (SYN-ACK):
+  → Verificar forward-ports no firewalld (causa mais comum)
+  → Verificar iptables -t nat -L -n
+
+Ver status do serviço proxy:
+  sudo systemctl status meu-proxy
+
+Ver logs do serviço proxy:
+  sudo journalctl -u meu-proxy -f
+
+
+--------------------------------------------------------------------------------
+GERENCIAR O SERVIÇO
+--------------------------------------------------------------------------------
+
+Iniciar:   sudo systemctl start meu-proxy
+Parar:     sudo systemctl stop meu-proxy
+Reiniciar: sudo systemctl restart meu-proxy
+Status:    sudo systemctl status meu-proxy
+Remover:   sudo systemctl disable --now meu-proxy
+           sudo rm /etc/systemd/system/meu-proxy.service
+           sudo systemctl daemon-reload
+
+
+--------------------------------------------------------------------------------
+EXEMPLO COMPLETO — POD MONITOR
+--------------------------------------------------------------------------------
+
+Configuração usada no ambiente de desenvolvimento:
+
+  Host AlmaLinux:  192.168.68.120
+  Minikube IP:     192.168.49.2
+  NodePort:        30080
+  Acesso externo:  http://192.168.68.120:30080
+
+Serviço criado:
+  /etc/systemd/system/pod-monitor-proxy.service
+
+Comando de verificação:
+  ss -tlnp | grep 30080
+  → LISTEN 0  5  0.0.0.0:30080  0.0.0.0:*
+
+================================================================================

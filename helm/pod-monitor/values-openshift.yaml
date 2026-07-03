@@ -1,0 +1,56 @@
+# OpenShift
+# Usa Routes em vez de Ingress.
+# Imagens devem estar no registry interno do OpenShift ou em um registry externo acessivel.
+#
+# IMPORTANTE - nginx nao-root:
+#   O OpenShift bloqueia containers rodando como root por padrao.
+#   O frontend usa nginx, que por padrao roda como root (UID 0).
+#   Opcoes:
+#     1. Reconstruir a imagem do frontend com nginxinc/nginx-unprivileged como base
+#        (porta muda de 80 para 8080) e ajustar containerPort + targetPort no values.
+#     2. Conceder permissao anyuid ao ServiceAccount (nao recomendado em producao):
+#        oc adm policy add-scc-to-user anyuid -z pod-monitor-sa -n pod-monitor
+#
+# Registry interno do OpenShift (exemplo):
+#   image.registry: image-registry.openshift-image-registry.svc:5000
+
+image:
+  registry: ""   # ex: "image-registry.openshift-image-registry.svc:5000/pod-monitor"
+  pullPolicy: IfNotPresent
+
+backend:
+  # JWT Secret — crie o secret antes do deploy:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n pod-monitor
+  jwtSecret:
+    existingSecret: "pod-monitor-secrets"
+    secretKey: "jwt-secret"
+
+  # Docker/Podman externo (opcional)
+  # docker:
+  #   enabled: true
+  #   hosts: "node=/var/run/docker.sock"
+  #   sockets:
+  #     - name: docker-sock
+  #       hostPath: /var/run/docker.sock
+  #       mountPath: /var/run/docker.sock
+
+ingress:
+  enabled: false
+
+openshift:
+  enabled: true
+  route:
+    host: ""   # deixar vazio para OpenShift gerar automaticamente
+    tls:
+      enabled: false
+      termination: edge
+
+securityContext:
+  # Descomente se usar nginx-unprivileged (UID 101, porta 8080)
+  # frontend:
+  #   runAsNonRoot: true
+  #   runAsUser: 101
+  frontend: {}
+  backend: {}

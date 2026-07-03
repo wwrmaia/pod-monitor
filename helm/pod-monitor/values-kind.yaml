@@ -1,0 +1,35 @@
+# kind (Kubernetes IN Docker)
+# Requer: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+# Imagens carregadas localmente com: kind load docker-image pod-monitor-backend:latest pod-monitor-frontend:latest
+
+image:
+  registry: ""
+  pullPolicy: Never
+
+backend:
+  # JWT Secret — crie o secret antes do deploy:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n pod-monitor
+  jwtSecret:
+    existingSecret: "pod-monitor-secrets"
+    secretKey: "jwt-secret"
+
+  # Docker/Podman externo (opcional)
+  # docker:
+  #   enabled: true
+  #   hosts: "node=/var/run/docker.sock"
+  #   sockets:
+  #     - name: docker-sock
+  #       hostPath: /var/run/docker.sock
+  #       mountPath: /var/run/docker.sock
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pod-monitor.local
+  # kind nao expoe NodePort por padrao; use port-forward ou ingress com extraPortMappings no cluster config
+
+frontend:
+  service:
+    type: ClusterIP

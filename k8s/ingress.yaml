@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pod-monitor-ingress
+  namespace: pod-monitor
+  annotations:
+    # ── TLS / HTTPS ───────────────────────────────────────────────────────────
+    # Redireciona HTTP → HTTPS automaticamente quando TLS estiver configurado.
+    # Descomente as linhas abaixo e configure a seção tls: para ativar.
+    # Para usar cert-manager, adicione também:
+    #   cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # ── Headers de segurança via ingress (complementa o nginx.conf) ───────────
+    # Tamanho máximo de corpo de requisição (protege contra uploads maliciosos)
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+    # Timeout para operações de proxy (evita conexões abertas indefinidamente)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Nota: server_tokens off requer que o ingress controller tenha snippets habilitados
+    # (--enable-annotation-validation=false ou allow-snippet-annotations=true no ConfigMap).
+    # Descomente a linha abaixo se o cluster permitir:
+    # nginx.ingress.kubernetes.io/server-snippet: "server_tokens off;"
+spec:
+  ingressClassName: nginx
+  # ── TLS — descomente e ajuste para ativar HTTPS ───────────────────────────
+  # Crie o secret antes de aplicar:
+  #   kubectl create secret tls pod-monitor-tls \
+  #     --cert=caminho/para/cert.pem \
+  #     --key=caminho/para/key.pem \
+  #     -n pod-monitor
+  # Ou use cert-manager (recomendado para produção):
+  #   https://cert-manager.io/docs/
+  # tls:
+  #   - secretName: pod-monitor-tls
+  #     hosts:
+  #       - pod-monitor.local
+  rules:
+    - host: pod-monitor.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-svc
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-svc
+                port:
+                  number: 80

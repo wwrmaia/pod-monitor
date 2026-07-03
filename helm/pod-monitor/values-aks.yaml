@@ -1,0 +1,56 @@
+# AKS (Azure Kubernetes Service)
+# Requer: nginx ingress controller instalado no cluster
+#   helm install ingress-nginx ingress-nginx/ingress-nginx --namespace ingress-nginx --create-namespace
+# Ou use AGIC (Application Gateway Ingress Controller) com className: azure/application-gateway
+#
+# Imagens no Azure Container Registry (ACR):
+#   az acr build --registry <ACR_NAME> --image pod-monitor-backend:latest ./backend
+#   az acr build --registry <ACR_NAME> --image pod-monitor-frontend:latest ./frontend
+# Autenticacao: attach ACR ao AKS (nao precisa de imagePullSecrets):
+#   az aks update -n <AKS_NAME> -g <RG> --attach-acr <ACR_NAME>
+
+image:
+  registry: "<ACR_NAME>.azurecr.io"  # substitua pelo seu ACR
+  pullPolicy: IfNotPresent
+  pullSecrets: []   # vazio se o ACR estiver vinculado ao AKS via managed identity
+
+backend:
+  # JWT Secret — crie o secret antes do deploy:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n pod-monitor
+  jwtSecret:
+    existingSecret: "pod-monitor-secrets"
+    secretKey: "jwt-secret"
+
+  # Docker/Podman externo (opcional)
+  # docker:
+  #   enabled: true
+  #   hosts: "node=/var/run/docker.sock"
+  #   sockets:
+  #     - name: docker-sock
+  #       hostPath: /var/run/docker.sock
+  #       mountPath: /var/run/docker.sock
+
+ingress:
+  enabled: true
+  className: nginx
+  host: pod-monitor.example.com   # substitua pelo seu dominio
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  tls: []
+  # Para TLS com cert-manager:
+  # annotations:
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  # tls:
+  #   - secretName: pod-monitor-tls
+  #     hosts:
+  #       - pod-monitor.example.com
+
+storage:
+  className: managed-csi   # SSD standard do AKS; use "managed-csi-premium" para Premium SSD
+  size: 5Gi
+
+frontend:
+  service:
+    type: ClusterIP

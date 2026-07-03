@@ -1,0 +1,63 @@
+# NetworkPolicy — Pod Monitor
+#
+# Restringe o tráfego de rede dentro do namespace pod-monitor:
+#
+#   backend: aceita conexões apenas de pods frontend e do ingress-nginx
+#   frontend: aceita conexões apenas do ingress-nginx
+#
+# IMPORTANTE: NetworkPolicies só têm efeito se o CNI do cluster suportar
+# (Calico, Cilium, Weave, etc.). Flannel puro NÃO suporta NetworkPolicy.
+#
+# Para verificar se o CNI suporta:
+#   kubectl get pods -n kube-system | grep -E "calico|cilium|weave|canal"
+
+# ── Backend: aceita tráfego apenas de frontend e ingress-nginx ────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow-frontend-and-ingress
+  namespace: pod-monitor
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    # Permite que o frontend faça chamadas ao backend (proxy /api/*)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Permite que o ingress-nginx faça chamadas diretas ao backend (/api/*)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# ── Frontend: aceita tráfego apenas do ingress-nginx ─────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-allow-ingress
+  namespace: pod-monitor
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 80

@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: pod-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: pod-monitor-sa
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: backend-data
+        # Descomente abaixo para habilitar monitoramento do Docker do host
+        # (requer que o volume docker.sock esteja montado no k3s — veja docker-compose.yml)
+        # - name: docker-sock
+        #   hostPath:
+        #     path: /var/run/docker.sock
+      containers:
+        - name: backend
+          image: registry:5000/pod-monitor-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_PATH
+              value: /data/pod-monitor.db
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pod-monitor-secrets
+                  key: jwt-secret
+            # Descomente para habilitar monitoramento Docker externo:
+            # - name: DOCKER_HOSTS
+            #   value: "host-docker=/var/run/docker.sock"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # - name: docker-sock
+            #   mountPath: /var/run/docker.sock
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-svc
+  namespace: pod-monitor
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080

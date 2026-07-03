@@ -1,0 +1,166 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Monitor — Default Values
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Global image settings
+image:
+  # Container registry prefix (e.g. "myregistry.azurecr.io", "123456789.dkr.ecr.us-east-1.amazonaws.com")
+  # Leave empty to use images without a registry prefix (local clusters with imagePullPolicy: Never)
+  registry: "docker.io/wwrmaia"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+  # - name: my-registry-secret
+
+backend:
+  image:
+    repository: pod-monitor-backend
+    tag: latest
+
+  # JWT Secret — recommended for production to avoid token invalidation on pod restart.
+  # Create the secret before installing:
+  #   kubectl create secret generic pod-monitor-secrets \
+  #     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+  #     -n <namespace>
+  jwtSecret:
+    existingSecret: ""       # Name of an existing Kubernetes Secret
+    secretKey: "jwt-secret"  # Key within the secret
+
+  # FRONTEND_ORIGIN restricts CORS to this origin only.
+  # Leave empty to allow any origin (not recommended for production).
+  frontendOrigin: ""
+
+  # Docker/Podman external host monitoring (optional)
+  # Enable to monitor containers running outside the Kubernetes cluster.
+  docker:
+    enabled: false
+    # Comma-separated list of Docker/Podman hosts.
+    # Format: "name=socket_path"  or  "name=tcp://host:port"
+    # Example: "minikube-node=tcp://localhost:2375,podman=/run/podman/podman.sock"
+    hosts: ""
+    # HostPath socket volumes to mount into the backend pod.
+    # Each entry creates a hostPath volume + volumeMount IN THE SIDECAR (not main container).
+    sockets: []
+    # - name: docker-sock
+    #   hostPath: /var/run/docker.sock
+    #   mountPath: /var/run/docker.sock
+    # - name: podman-sock
+    #   hostPath: /run/podman/podman.sock
+    #   mountPath: /run/podman/podman.sock
+
+    # ── Socket Proxy (RECOMENDADO para produção) ──────────────────────────────
+    # Adiciona um sidecar docker-socket-proxy que expõe apenas endpoints de
+    # leitura (version + containers/stats) em tcp://localhost:2375.
+    # O backend nunca monta o docker.sock diretamente, eliminando o risco
+    # de escalação de privilégios.
+    #
+    # Quando enabled=true e socketProxy.enabled=true:
+    #   - docker.sock é montado SOMENTE no sidecar
+    #   - backend usa tcp://localhost:2375 automaticamente
+    socketProxy:
+      enabled: false
+      image: ghcr.io/tecnativa/docker-socket-proxy:edge
+      # Endpoints permitidos (1=sim, 0=não)
+      allowedEndpoints:
+        VERSION: "1"      # GET /version
+        CONTAINERS: "1"   # GET /containers/json e /containers/{id}/stats
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+  # Extra environment variables
+  env: []
+  # - name: SOME_VAR
+  #   value: "value"
+
+frontend:
+  image:
+    repository: pod-monitor-frontend
+    tag: latest
+
+  # Hostname do backend usado pelo Nginx para proxy /api/*.
+  # Em Kubernetes usa o nome do Service (backend-svc).
+  # Em docker-compose, definido automaticamente como "backend".
+  backendHost: backend-svc
+  service:
+    type: ClusterIP
+    # nodePort is only used when type is NodePort
+    nodePort: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+postgres:
+  # Set to false to use an external PostgreSQL instance (provide existingSecret below).
+  enabled: true
+  image: postgres:16-alpine
+  # Credentials for the bundled PostgreSQL instance.
+  # Change these before deploying to production!
+  user: podmonitor
+  password: changeme
+  database: podmonitor
+  # Reference an existing Secret instead of creating one.
+  # The secret must contain keys: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL.
+  existingSecret: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+storage:
+  # StorageClass name. Leave empty to use the cluster default.
+  # Examples: "standard" (kind), "local-path" (k3s), "managed-csi" (AKS), "gp2" (EKS)
+  className: ""
+  size: 5Gi
+
+# Standard Kubernetes Ingress (nginx, Traefik, AGIC, ALB, etc.)
+ingress:
+  enabled: true
+  # IngressClass name. Examples: "nginx", "traefik", "azure/application-gateway"
+  className: nginx
+  host: pod-monitor.local
+  annotations: {}
+  tls: []
+  # - secretName: pod-monitor-tls
+  #   hosts:
+  #     - pod-monitor.local
+
+# OpenShift-specific settings
+openshift:
+  # Set to true to create Routes instead of Ingress
+  enabled: false
+  route:
+    # Leave empty to let OpenShift auto-assign the hostname
+    host: ""
+    tls:
+      enabled: false
+      # edge | passthrough | reencrypt
+      termination: edge
+
+# Pod security contexts
+# On OpenShift, override these if your SCC requires it
+securityContext:
+  backend: {}
+  frontend: {}
+  # OpenShift example (if using nginx-unprivileged image):
+  # frontend:
+  #   runAsNonRoot: true
+  #   runAsUser: 101
