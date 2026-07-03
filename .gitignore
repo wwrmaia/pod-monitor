@@ -35,3 +35,6 @@ k3s-registries.yaml
 script_conversao_texto/
 docker_install/
 *.docx
+
+# Instruções Claude Code (local only)
+CLAUDE.md
