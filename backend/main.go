@@ -4418,6 +4418,35 @@ func handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
+// dispatchWebhook envia o payload para url com até 3 tentativas e backoff exponencial.
+// Retentar em: erro de rede, timeout, HTTP 5xx.
+// Não retentar em: HTTP 4xx (erro do cliente — URL errada, auth inválida, etc.).
+var webhookBackoff = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
+
+func dispatchWebhook(url string, payload []byte) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	for attempt, delay := range webhookBackoff {
+		resp, err := client.Post(url, "application/json", strings.NewReader(string(payload)))
+		if err == nil {
+			code := resp.StatusCode
+			resp.Body.Close()
+			if code < 500 {
+				if code >= 400 {
+					log.Printf("webhook %s recusado (HTTP %d) — sem retry", url, code)
+				}
+				return
+			}
+			log.Printf("webhook %s falhou (HTTP %d), tentativa %d/3, próxima em %s", url, code, attempt+1, delay)
+		} else {
+			log.Printf("webhook %s erro: %v, tentativa %d/3, próxima em %s", url, err, attempt+1, delay)
+		}
+		if attempt < len(webhookBackoff)-1 {
+			time.Sleep(delay)
+		}
+	}
+	log.Printf("webhook %s abandonado após 3 tentativas", url)
+}
+
 func triggerWebhooks(eventName string, payloadObj interface{}) {
 	if db == nil {
 		return
@@ -4445,15 +4474,7 @@ func triggerWebhooks(eventName string, payloadObj interface{}) {
 		return
 	}
 	for _, u := range urls {
-		go func(url string) {
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Post(url, "application/json", strings.NewReader(string(payload)))
-			if err != nil {
-				log.Printf("webhook %s erro: %v", url, err)
-				return
-			}
-			resp.Body.Close()
-		}(u)
+		go dispatchWebhook(u, payload)
 	}
 }
 
