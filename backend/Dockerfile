@@ -2,7 +2,7 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY main.go ./
+COPY main.go openapi.yaml ./
 RUN CGO_ENABLED=0 go build -o api main.go
 
 FROM alpine:3.19
