@@ -25,6 +25,9 @@
 21. [Aviso de Expiração de Sessão](#21-aviso-de-expiração-de-sessão)
 22. [Modo NOC — Rotação Automática](#22-modo-noc--rotação-automática)
 23. [Segurança](#23-segurança)
+24. [Paginação de APIs](#24-paginação-de-apis)
+25. [Documentação OpenAPI / Swagger UI](#25-documentação-openapi--swagger-ui)
+26. [Changelog](#26-changelog)
 
 ---
 
@@ -1724,7 +1727,22 @@ kubectl delete -f k8s/example-quota.yaml   # remover após testes
 
 ### Como funciona
 
-O backend dispara um HTTP POST para cada webhook habilitado sempre que o endpoint `/api/dashboard/summary` detecta pods acima do threshold configurado. Os disparos são assíncronos (goroutine) e não bloqueiam a resposta ao frontend.
+O backend dispara um HTTP POST para cada webhook habilitado sempre que o endpoint `/api/dashboard/summary` detecta pods acima do threshold configurado, e também para cada operação registrada no audit log (`events="audit"`). Os disparos são assíncronos (goroutine por URL) e não bloqueiam a resposta ao frontend.
+
+### Retry com backoff exponencial
+
+A partir da v0.4.0, cada disparo de webhook tem até **3 tentativas** com backoff exponencial:
+
+| Tentativa | Aguarda antes da próxima |
+|-----------|--------------------------|
+| 1ª falha  | 5 segundos |
+| 2ª falha  | 30 segundos |
+| 3ª falha  | abandona, loga erro |
+
+**Retentar em:** erro de rede, timeout, HTTP 5xx (servidor indisponível).  
+**Não retentar em:** HTTP 4xx — URL incorreta, autenticação inválida, recurso não encontrado. Repetir não resolveria o problema.
+
+Cada URL configurada roda em goroutine independente — uma URL lenta não bloqueia as demais.
 
 ### Configuração (Admin → Webhooks)
 
@@ -1824,6 +1842,8 @@ Os thresholds configuram tanto os alertas do Dashboard (`DashSummary.Alerts`) qu
 ### Visão geral
 
 Todas as ações administrativas executadas no Pod Monitor são registradas automaticamente na tabela `audit_log` do PostgreSQL. O log é exibido em Admin → Auditoria (somente para `administration`).
+
+A partir da v0.4.0, cada entrada do audit log também dispara webhooks configurados com `events="audit"` ou `events="*"` em tempo real, com retry automático (ver [seção 17](#17-webhooks-de-alertas)).
 
 ### Ações registradas
 
@@ -1992,6 +2012,28 @@ As configurações são salvas no `localStorage` do navegador e sobrevivem a rel
 
 ## 23. Segurança
 
+### Medidas implementadas (v0.4.0)
+
+#### Bcrypt cost = 12
+
+O custo do bcrypt foi elevado explicitamente de 10 (padrão Go) para **12** em todos os pontos de geração de hash (criação de usuário, troca de senha, usuário admin padrão e seed de usuários). A constante `bcryptCost = 12` está definida em `backend/main.go`.
+
+#### Container não-root (backend)
+
+O Dockerfile do backend cria um usuário dedicado (`appuser`) e executa o processo como não-root. O securityContext do Kubernetes reforça isso com `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, `capabilities: drop [ALL]` e `seccompProfile: RuntimeDefault`.
+
+#### Pod Security Standards
+
+O namespace `pod-monitor` tem labels PSS configuradas:
+
+| Label | Valor | Efeito |
+|-------|-------|--------|
+| `enforce` | `baseline` | Bloqueia containers privilegiados, hostPID, hostNetwork |
+| `warn` | `restricted` | Emite avisos para violações do nível mais restritivo |
+| `audit` | `restricted` | Registra violações do nível mais restritivo nos logs de auditoria do cluster |
+
+O frontend tem `allowPrivilegeEscalation: false`, `drop [ALL]` e `add [NET_BIND_SERVICE]` (necessário para o nginx bindar a porta 80).
+
 ### Medidas implementadas (v0.3.0)
 
 #### Rate Limiting (autenticação)
@@ -2050,14 +2092,128 @@ A análise detalhada de segurança, comparação com ferramentas de mercado e ro
 
 ---
 
+## 24. Paginação de APIs
+
+### Visão geral
+
+Os endpoints `/api/resources` e `/api/nodes` suportam paginação opcional a partir da v0.4.0. O comportamento padrão (sem paginação) é preservado para compatibilidade com o frontend atual.
+
+### Como usar
+
+Adicione o parâmetro `page` à requisição para ativar a paginação:
+
+```
+GET /api/resources?namespace=default&page=1&page_size=50
+GET /api/nodes?page=1
+```
+
+| Parâmetro | Descrição | Padrão | Máximo |
+|-----------|-----------|--------|--------|
+| `page` | Número da página (base 1) — ativa paginação | — | — |
+| `page_size` | Itens por página | 100 | 500 |
+
+### Formato da resposta paginada
+
+```json
+{
+  "items": [ ...array de pods ou nós... ],
+  "total": 1234,
+  "page": 1,
+  "page_size": 100,
+  "total_pages": 13
+}
+```
+
+Sem o parâmetro `page`, a resposta continua sendo um array JSON simples (comportamento original).
+
+---
+
+## 25. Documentação OpenAPI / Swagger UI
+
+### Spec OpenAPI 3.0
+
+A partir da v0.4.0, o backend serve a especificação OpenAPI 3.0 completa de todos os endpoints:
+
+```
+GET /openapi.yaml
+```
+
+O arquivo é embutido no binário via `//go:embed openapi.yaml` — sem dependência de arquivos externos em runtime. Pode ser importado diretamente no Postman, Insomnia, ou qualquer ferramenta compatível.
+
+### Swagger UI
+
+Interface visual interativa disponível em:
+
+```
+GET /docs
+```
+
+Carrega o Swagger UI via CDN e aponta para `/openapi.yaml`. Permite explorar, testar e entender todos os endpoints sem sair do navegador.
+
+### Cobertura
+
+A spec cobre todos os 40+ endpoints organizados em 11 tags:
+
+| Tag | Endpoints |
+|-----|-----------|
+| Health | `/healthz`, `/openapi.yaml`, `/docs` |
+| Auth | Login, logout, MFA (setup, validar, reset) |
+| Admin | Usuários, grupos, clusters, docker hosts |
+| Clusters | Listar clusters e namespaces |
+| Resources | Pods, nós, storage, logs, análise, quotas, topologia |
+| Docker | Hosts Docker/Podman externos e containers |
+| Helm | Releases e Deployments |
+| History | Snapshots históricos e exportação CSV |
+| Dashboard | Resumo, timeseries e layouts salvos |
+| Audit | Audit log, webhooks e thresholds |
+| SSE | Server-Sent Events |
+
+---
+
+## 26. Changelog
+
+### v0.4.0 — 2026-07-03
+
+#### Novas funcionalidades
+- **Webhook retry** — disparo de webhooks com 3 tentativas e backoff exponencial (5s → 30s → 2min). HTTP 4xx não retenta; HTTP 5xx e erros de rede retentam automaticamente.
+- **Audit log → webhook** — cada operação registrada no audit log agora dispara webhooks configurados com `events="audit"` em tempo real.
+- **Paginação de APIs** — `/api/resources` e `/api/nodes` aceitam `?page=N&page_size=N`; sem o parâmetro, comportamento original é preservado.
+- **OpenAPI 3.0** — spec completa em `GET /openapi.yaml` (embutida no binário via `go:embed`); Swagger UI interativo em `GET /docs`.
+- **Health check real** — `/healthz` verifica conectividade com o PostgreSQL (`db.PingContext`) e reporta número de clusters registrados. Retorna HTTP 503 quando o DB está inacessível.
+
+#### Segurança
+- **Bcrypt cost = 12** — elevado de 10 (padrão Go) para 12 em todos os pontos de geração de hash.
+- **Container não-root** — Dockerfile do backend cria `appuser` e executa como não-root; `securityContext` adicionado nos manifests Kubernetes.
+- **Pod Security Standards** — namespace `pod-monitor` com `enforce: baseline`, `warn: restricted`, `audit: restricted`.
+
+#### Infraestrutura
+- Repositório publicado no GitHub: `github.com/wwrmaia/pod-monitor`
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.4.0`, `wwrmaia/pod-monitor-frontend:0.3.1`
+- Helm chart OCI: `oci://registry-1.docker.io/wwrmaia/pod-monitor:0.4.0`
+
+### v0.3.1 — 2026-05-21
+
+#### Segurança
+- Rate limiting nos endpoints de autenticação (10 tentativas / 5 min por IP, bloqueio de 15 min)
+- JWT blacklist — logout revoga token imediatamente
+- TOTP criptografado com AES-256-GCM
+- CORS restritivo via `FRONTEND_ORIGIN`
+- Headers HTTP de segurança no Nginx (CSP, X-Frame-Options, etc.)
+- NetworkPolicy Kubernetes
+- Docker socket proxy sidecar (nunca monta docker.sock no container principal)
+- Aviso de senha padrão no startup
+
+---
+
 ## Apêndice — Estrutura de arquivos
 
 ```
 pod-monitor/
 ├── backend/
 │   ├── main.go              # Servidor Go único — toda a lógica do backend
+│   ├── openapi.yaml         # Spec OpenAPI 3.0 (embutida no binário via go:embed)
 │   ├── go.mod / go.sum
-│   └── Dockerfile           # Multi-stage build
+│   └── Dockerfile           # Multi-stage build (não-root: appuser)
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx          # Componente React único — toda a UI
@@ -2077,7 +2233,7 @@ pod-monitor/
 │   ├── network-policy.yaml  # NetworkPolicy (requer CNI compatível)
 │   └── example-quota.yaml   # ResourceQuota + LimitRange de exemplo (testes)
 ├── helm/
-│   └── pod-monitor/         # Helm chart multi-ambiente (v0.3.0)
+│   └── pod-monitor/         # Helm chart multi-ambiente (v0.4.0)
 ├── scripts/
 │   └── migrate-sqlite-to-postgres.sh  # Migração de dados SQLite → PostgreSQL
 ├── docs/
@@ -2087,5 +2243,5 @@ pod-monitor/
 ├── docker-compose.yml               # Stack local com k3s embutido (uso com deploy.sh)
 ├── docker-compose.hub.yml           # Instalação via Docker Hub (PostgreSQL + backend + frontend)
 ├── deploy.sh                        # Script de deploy automatizado (k3s + registry local)
-└── CLAUDE.md                        # Instruções para o assistente IA
+└── CLAUDE.md                        # Instruções para o assistente IA (local only, não versionado)
 ```
