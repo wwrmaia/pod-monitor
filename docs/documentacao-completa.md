@@ -1515,6 +1515,9 @@ O status visual de cada nó é indicado pela cor da borda:
 | `scales` | Sólida | Laranja | HPA escala o Deployment / StatefulSet alvo |
 | `routes` | Sólida | Ciano | Ingress roteia tráfego para Service |
 | `spawns` | Tracejada | Lilás | CronJob cria um Job |
+| `connects` | Tracejada | Vermelho | Pod referencia o hostname de um Service dentro do valor de uma env var / Secret / ConfigMap (ex.: `DATABASE_URL=postgres://...@postgres-svc:5432/...`) |
+
+> A aresta `connects` é inferida: o backend decodifica internamente o valor referenciado por `env[].valueFrom` (ou o literal de `env[].value`) e verifica se contém o nome de algum Service do namespace. O valor decodificado nunca é incluído na resposta da API — só é usado para detectar a correspondência e desenhar a aresta. É assim que uma dependência como "backend → banco de dados" aparece no grafo mesmo sem nenhuma referência estrutural direta entre os dois recursos no Kubernetes.
 
 ### Layout do grafo
 
@@ -1526,6 +1529,17 @@ O grafo suporta dois modos de layout, alternados pelo botão `⬡`/`◎` no cant
 | **Circular** | `◎` | Nós agrupados por tipo em anéis concêntricos. Mais legível para grafos simples. |
 
 Ao trocar de modo, o layout é recalculado e o grafo é re-centralizado automaticamente.
+
+### Exportar como draw.io
+
+O botão `⬇` (ao lado de `⬡`/`◎`, canto superior direito) baixa o grafo atualmente visível como um arquivo `.drawio` (formato mxGraph/XML, abre em [app.diagrams.net](https://app.diagrams.net) ou no draw.io desktop):
+
+- Exporta exatamente o que está na tela: respeita os filtros de tipo ativos na legenda, o toggle "Ocultar ReplicaSets vazios" e o resultado da busca por regex
+- Usa as posições atuais do layout (force-directed ou circular, o que estiver selecionado no momento do download)
+- Cores dos nós e arestas seguem a mesma paleta da UI (`NODE_COLORS` / `EDGE_COLORS`), incluindo o tracejado para `env`, `spawns` e `connects`
+- O nome de cada componente é renderizado **fora** do símbolo (acima dele, com largura fixa de 130px que quebra em várias linhas) — o círculo colorido serve só como indicador visual do tipo, evitando que nomes longos estourem o layout
+- Uma **legenda é embutida no próprio arquivo**, abaixo do grafo, com todos os tipos de nó e de aresta (traduzida no idioma ativo da UI — PT ou EN)
+- O nome do arquivo inclui timestamp: `topology-AAAA-MM-DD-HH-MM-SS.drawio`
 
 ### Interação
 
@@ -1653,7 +1667,9 @@ Retorna:
     { "from": "CronJob/default/meu-cj",     "to": "Job/default/meu-job",        "type": "spawns" },
     { "from": "Job/default/meu-job",        "to": "Pod/default/meu-pod",        "type": "owns" },
     { "from": "Ingress/default/meu-ing",    "to": "Service/default/meu-svc",    "type": "routes" },
-    { "from": "HPA/default/meu-hpa",        "to": "Deployment/default/meu-dep", "type": "scales" }
+    { "from": "HPA/default/meu-hpa",        "to": "Deployment/default/meu-dep", "type": "scales" },
+    { "from": "Pod/default/meu-pod",        "to": "Secret/default/db-secret",   "type": "env" },
+    { "from": "Pod/default/meu-pod",        "to": "Service/default/postgres-svc","type": "connects" }
   ]
 }
 ```
@@ -2172,6 +2188,19 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 26. Changelog
 
+### v0.5.0 — 2026-07-05
+
+#### Novas funcionalidades
+- **Exportar topologia como draw.io** — botão `⬇` na aba Topologia baixa o grafo visível (respeitando filtros ativos) como arquivo `.drawio`, com legenda embutida e nomes de componentes posicionados fora dos símbolos.
+- **Aresta `connects`** — o backend detecta quando o valor de uma env var, Secret ou ConfigMap referenciado por um Pod contém o hostname de um Service do namespace (ex.: `DATABASE_URL` apontando para `postgres-svc`) e desenha essa dependência no grafo de topologia. O valor decodificado nunca é exposto na API, só usado internamente para a detecção.
+
+#### Correções
+- Env vars via `env[].valueFrom.secretKeyRef` / `configMapKeyRef` (referência por chave individual) agora geram aresta `env` na topologia — antes só `envFrom` (secret/configmap inteiro) era capturado, fazendo com que dependências comuns (como credenciais de banco) não aparecessem no grafo.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.5.0`, `wwrmaia/pod-monitor-frontend:0.5.0`
+- Helm chart: `version: 0.5.0`, `appVersion: "0.5.0"`
+
 ### v0.4.0 — 2026-07-03
 
 #### Novas funcionalidades
@@ -2233,7 +2262,7 @@ pod-monitor/
 │   ├── network-policy.yaml  # NetworkPolicy (requer CNI compatível)
 │   └── example-quota.yaml   # ResourceQuota + LimitRange de exemplo (testes)
 ├── helm/
-│   └── pod-monitor/         # Helm chart multi-ambiente (v0.4.0)
+│   └── pod-monitor/         # Helm chart multi-ambiente (v0.5.0)
 ├── scripts/
 │   └── migrate-sqlite-to-postgres.sh  # Migração de dados SQLite → PostgreSQL
 ├── docs/
