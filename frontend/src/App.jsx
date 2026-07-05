@@ -2329,6 +2329,102 @@ const NODE_RADII = {
 const EDGE_COLORS = {
   owns: '#10b981', selects: '#f59e0b', mounts: '#a78bfa',
   env: '#94a3b8', scales: '#fb923c', routes: '#22d3ee', spawns: '#c084fc',
+  connects: '#ef4444',
+}
+
+function escapeXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+}
+
+function downloadTopologyAsDrawio(nodes, edges, positions, t) {
+  const idMap = new Map()
+  nodes.forEach((n, i) => idMap.set(n.id, `n${i}`))
+  const edgeLabel = type => {
+    const key = 'topoEdge' + type.charAt(0).toUpperCase() + type.slice(1)
+    return (t && t(key)) || type
+  }
+
+  const xs = nodes.map(n => positions[n.id]?.x ?? 0)
+  const ys = nodes.map(n => positions[n.id]?.y ?? 0)
+  const offX = -Math.min(0, ...xs) + 60
+  const offY = -Math.min(0, ...ys) + 60
+
+  // Nome fica FORA do símbolo (acima), com largura fixa para quebrar em
+  // várias linhas — evita que nomes longos estourem o círculo colorido,
+  // que serve só como indicador visual do tipo (cor = kind, ver legenda).
+  const LABEL_WIDTH = 130
+  let maxBottom = 0
+  const vertices = nodes.map(n => {
+    const pos = positions[n.id]
+    if (!pos) return ''
+    const r = NODE_RADII[n.kind] || 20
+    const size = r * 2
+    const color = NODE_COLORS[n.kind] || '#94a3b8'
+    const x = pos.x + offX - r
+    const y = pos.y + offY - r
+    maxBottom = Math.max(maxBottom, y + size)
+    const label = `&lt;div style='width:${LABEL_WIDTH}px;'&gt;&lt;b style='color:${color};'&gt;${escapeXml(n.kind)}&lt;/b&gt;&lt;br&gt;${escapeXml(n.name)}&lt;/div&gt;`
+    return `<mxCell id="${idMap.get(n.id)}" value="${label}" style="ellipse;whiteSpace=wrap;html=1;fillColor=${color};fillOpacity=25;strokeColor=${color};strokeWidth=2;fontSize=10;verticalLabelPosition=top;verticalAlign=bottom;align=center;" vertex="1" parent="1"><mxGeometry x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${size}" height="${size}" as="geometry" /></mxCell>`
+  }).join('')
+
+  const edgeCells = edges
+    .filter(e => idMap.has(e.from) && idMap.has(e.to))
+    .map((e, i) => {
+      const color = EDGE_COLORS[e.type] || '#64748b'
+      const dashed = (e.type === 'env' || e.type === 'spawns' || e.type === 'connects') ? 'dashed=1;dashPattern=4 3;' : ''
+      return `<mxCell id="e${i}" value="${escapeXml(edgeLabel(e.type))}" style="endArrow=classic;html=1;strokeColor=${color};strokeWidth=1.5;fontSize=8;${dashed}" edge="1" parent="1" source="${idMap.get(e.from)}" target="${idMap.get(e.to)}"><mxGeometry relative="1" as="geometry" /></mxCell>`
+    }).join('')
+
+  // Legenda (cores dos nós + tipos de aresta), posicionada abaixo do grafo.
+  const legendX = 60
+  let legendY = maxBottom + 60
+  const legendCells = []
+  let legendSeq = 0
+  const nextLegendId = () => `legend${legendSeq++}`
+  const COLS = 4
+  const ITEM_W = 190
+  const ITEM_H = 26
+
+  legendCells.push(`<mxCell id="${nextLegendId()}" value="${escapeXml(t ? t('topoTitle') : 'Legenda')}" style="text;html=1;fontSize=14;fontStyle=1;align=left;" vertex="1" parent="1"><mxGeometry x="${legendX}" y="${legendY}" width="300" height="24" as="geometry" /></mxCell>`)
+  legendY += 34
+
+  const nodeEntries = Object.entries(NODE_COLORS)
+  nodeEntries.forEach(([kind, color], i) => {
+    const col = i % COLS
+    const row = Math.floor(i / COLS)
+    const x = legendX + col * ITEM_W
+    const y = legendY + row * ITEM_H
+    legendCells.push(`<mxCell id="${nextLegendId()}" style="ellipse;html=1;fillColor=${color};fillOpacity=30;strokeColor=${color};strokeWidth=1.5;" vertex="1" parent="1"><mxGeometry x="${x}" y="${y + 4}" width="16" height="16" as="geometry" /></mxCell>`)
+    legendCells.push(`<mxCell id="${nextLegendId()}" value="${escapeXml(kind)}" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;" vertex="1" parent="1"><mxGeometry x="${x + 22}" y="${y}" width="${ITEM_W - 24}" height="24" as="geometry" /></mxCell>`)
+  })
+  legendY += Math.ceil(nodeEntries.length / COLS) * ITEM_H + 24
+
+  legendCells.push(`<mxCell id="${nextLegendId()}" value="${escapeXml(t ? t('topoConnections') : 'Conexões')}" style="text;html=1;fontSize=14;fontStyle=1;align=left;" vertex="1" parent="1"><mxGeometry x="${legendX}" y="${legendY}" width="300" height="24" as="geometry" /></mxCell>`)
+  legendY += 34
+
+  const edgeEntries = Object.entries(EDGE_COLORS)
+  edgeEntries.forEach(([type, color], i) => {
+    const col = i % COLS
+    const row = Math.floor(i / COLS)
+    const x = legendX + col * ITEM_W
+    const y = legendY + row * ITEM_H
+    const dashed = (type === 'env' || type === 'spawns' || type === 'connects') ? 'dashed=1;dashPattern=4 3;' : ''
+    legendCells.push(`<mxCell id="${nextLegendId()}" value="" style="endArrow=none;html=1;strokeColor=${color};strokeWidth=2;${dashed}" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="${x}" y="${y + 10}" as="sourcePoint" /><mxPoint x="${x + 28}" y="${y + 10}" as="targetPoint" /></mxGeometry></mxCell>`)
+    legendCells.push(`<mxCell id="${nextLegendId()}" value="${escapeXml(edgeLabel(type))}" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;" vertex="1" parent="1"><mxGeometry x="${x + 34}" y="${y}" width="${ITEM_W - 36}" height="24" as="geometry" /></mxCell>`)
+  })
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<mxfile host="pod-monitor"><diagram name="Topology" id="topology"><mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0"><root><mxCell id="0" /><mxCell id="1" parent="0" />${vertices}${edgeCells}${legendCells.join('')}</root></mxGraphModel></diagram></mxfile>`
+
+  const blob = new Blob([xml], { type: 'application/xml' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  a.download = `topology-${ts}.drawio`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 function TopoGraph({ nodes, edges, lang }) {
@@ -2492,7 +2588,7 @@ function TopoGraph({ nodes, edges, lang }) {
             const len = Math.sqrt(dx * dx + dy * dy) || 1
             const r = NODE_RADII[visibleNodes.find(n => n.id === e.to)?.kind] || 20
             const ex = to.x - dx / len * (r + 3), ey = to.y - dy / len * (r + 3)
-            const isDashed = e.type === 'env' || e.type === 'spawns'
+            const isDashed = e.type === 'env' || e.type === 'spawns' || e.type === 'connects'
             return (
               <line key={i} x1={from.x} y1={from.y} x2={ex} y2={ey}
                 stroke={color} strokeWidth={1.5} strokeOpacity={0.7}
@@ -2540,6 +2636,13 @@ function TopoGraph({ nodes, edges, lang }) {
           style={{ width: 28, height: 28, borderRadius: 4, border: '1px solid var(--border)', background: layoutMode === 'force' ? 'var(--accent)' : 'var(--bg-1)', color: layoutMode === 'force' ? '#fff' : 'var(--text-1)', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
           {layoutMode === 'force' ? '⬡' : '◎'}
         </button>
+        <button
+          onClick={() => downloadTopologyAsDrawio(visibleNodes, visibleEdges, positions, t)}
+          title={t('topoDownloadDrawio')}
+          disabled={visibleNodes.length === 0}
+          style={{ width: 28, height: 28, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-1)', color: 'var(--text-1)', cursor: visibleNodes.length === 0 ? 'default' : 'pointer', fontSize: 14 }}>
+          ⬇
+        </button>
       </div>
 
       {/* Legenda interativa */}
@@ -2565,7 +2668,7 @@ function TopoGraph({ nodes, edges, lang }) {
         {/* Arestas */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {Object.entries(EDGE_COLORS).map(([type, color]) => {
-            const isDashed = type === 'env' || type === 'spawns'
+            const isDashed = type === 'env' || type === 'spawns' || type === 'connects'
             return (
               <span key={type} style={{ fontSize: 10, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 3 }}>
                 <svg width={20} height={10}><line x1={0} y1={5} x2={20} y2={5} stroke={color} strokeWidth={1.5} strokeDasharray={isDashed ? '3,2' : undefined} /></svg>

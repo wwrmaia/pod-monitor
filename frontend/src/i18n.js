@@ -368,6 +368,7 @@ export const translations = {
     topoEdgeScales: 'escala',
     topoEdgeRoutes: 'roteia',
     topoEdgeSpawns: 'gera',
+    topoEdgeConnects: 'conecta',
     topoLegendHpa: 'HPA',
     hpaTarget: 'Alvo',
     hpaReplicas: 'Réplicas',
@@ -391,6 +392,7 @@ export const translations = {
     topoAutoRefreshTitle: 'Ativar/desativar auto-refresh via SSE (atualiza a cada 30s)',
     topoSwitchToCircle: 'Mudar para layout circular',
     topoSwitchToForce: 'Mudar para layout force-directed',
+    topoDownloadDrawio: 'Baixar como draw.io',
 
     // ── Quotas ────────────────────────────────────────────────────────
     quotasTitle: 'Resource Quotas & LimitRanges',
@@ -1085,6 +1087,7 @@ export const translations = {
     topoEdgeScales: 'scales',
     topoEdgeRoutes: 'routes',
     topoEdgeSpawns: 'spawns',
+    topoEdgeConnects: 'connects',
     topoLegendHpa: 'HPA',
     hpaTarget: 'Target',
     hpaReplicas: 'Replicas',
@@ -1108,6 +1111,7 @@ export const translations = {
     topoAutoRefreshTitle: 'Enable/disable auto-refresh via SSE (updates every 30s)',
     topoSwitchToCircle: 'Switch to circular layout',
     topoSwitchToForce: 'Switch to force-directed layout',
+    topoDownloadDrawio: 'Download as draw.io',
 
     // ── Quotas ────────────────────────────────────────────────────────
     quotasTitle: 'Resource Quotas & LimitRanges',

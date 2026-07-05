@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -4607,6 +4608,54 @@ func handleTopology(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = clusterName
 
+	// Services, Secrets e ConfigMaps são carregados adiantado para permitir
+	// a detecção de conexões "connects" (hostname de Service embutido em
+	// valores de env var / secret) durante o processamento dos Pods.
+	svcs, _ := clients.k8s.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	allSecrets, _ := clients.k8s.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{})
+	allConfigMaps, _ := clients.k8s.CoreV1().ConfigMaps(ns).List(ctx, metav1.ListOptions{})
+
+	secretByKey := map[string]*corev1.Secret{}
+	if allSecrets != nil {
+		for i := range allSecrets.Items {
+			s := &allSecrets.Items[i]
+			secretByKey[s.Namespace+"/"+s.Name] = s
+		}
+	}
+	cmByKey := map[string]*corev1.ConfigMap{}
+	if allConfigMaps != nil {
+		for i := range allConfigMaps.Items {
+			c := &allConfigMaps.Items[i]
+			cmByKey[c.Namespace+"/"+c.Name] = c
+		}
+	}
+	// nodeID "Service/ns/name" → regex que casa o nome do Service como palavra inteira
+	svcNameRe := map[string]*regexp.Regexp{}
+	if svcs != nil {
+		for _, svc := range svcs.Items {
+			if svc.Name == "kubernetes" && svc.Namespace == "default" {
+				continue
+			}
+			svcNameRe[nodeID("Service", svc.Namespace, svc.Name)] = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(svc.Name) + `\b`)
+		}
+	}
+	// detectConnects escaneia um valor (env var / conteúdo de secret ou configmap)
+	// em busca do nome de algum Service conhecido, criando uma aresta "connects".
+	// O valor decodificado NUNCA é incluído na resposta da API, só usado aqui.
+	detectConnects := func(podNS, podName, value string) {
+		if value == "" {
+			return
+		}
+		for svcID, re := range svcNameRe {
+			if re.MatchString(value) {
+				parts := strings.SplitN(svcID, "/", 3)
+				if len(parts) == 3 {
+					addEdge("Pod", podNS, podName, "Service", parts[1], parts[2], "connects")
+				}
+			}
+		}
+	}
+
 	// Pods
 	pods, err := clients.k8s.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -4640,6 +4689,25 @@ func handleTopology(w http.ResponseWriter, r *http.Request) {
 				}
 				if env.SecretRef != nil {
 					addEdge("Pod", pod.Namespace, pod.Name, "Secret", pod.Namespace, env.SecretRef.Name, "env")
+				}
+			}
+			// env[].valueFrom (referências por chave individual, ex.: DATABASE_URL)
+			for _, ev := range c.Env {
+				if ev.ValueFrom != nil {
+					if ref := ev.ValueFrom.ConfigMapKeyRef; ref != nil {
+						addEdge("Pod", pod.Namespace, pod.Name, "ConfigMap", pod.Namespace, ref.Name, "env")
+						if cm, ok := cmByKey[pod.Namespace+"/"+ref.Name]; ok {
+							detectConnects(pod.Namespace, pod.Name, cm.Data[ref.Key])
+						}
+					}
+					if ref := ev.ValueFrom.SecretKeyRef; ref != nil {
+						addEdge("Pod", pod.Namespace, pod.Name, "Secret", pod.Namespace, ref.Name, "env")
+						if sec, ok := secretByKey[pod.Namespace+"/"+ref.Name]; ok {
+							detectConnects(pod.Namespace, pod.Name, string(sec.Data[ref.Key]))
+						}
+					}
+				} else if ev.Value != "" {
+					detectConnects(pod.Namespace, pod.Name, ev.Value)
 				}
 			}
 		}
@@ -4696,8 +4764,7 @@ func handleTopology(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Services
-	svcs, _ := clients.k8s.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	// Services (já carregado no início desta função, ver svcs acima)
 	if svcs != nil {
 		for _, svc := range svcs.Items {
 			if svc.Name == "kubernetes" && svc.Namespace == "default" {
