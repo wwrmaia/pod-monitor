@@ -2254,17 +2254,51 @@ func initDB() {
 		log.Println("DATABASE_URL não configurado, histórico e usuários não persistidos")
 		return
 	}
-	var err error
-	db, err = sql.Open("postgres", dsn)
-	if err != nil { log.Printf("Erro ao abrir PostgreSQL: %v", err); return }
-	if err = db.Ping(); err != nil {
-		log.Printf("Erro ao conectar ao PostgreSQL: %v", err)
-		db = nil
+	if connectDB(dsn) {
+		go cleanupLoop()
 		return
 	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// Falha na subida (ex.: DNS do cluster ainda não pronto) não deve deixar o
+	// backend rodando sem persistência até um restart manual — tenta de novo
+	// em segundo plano com backoff exponencial, sem bloquear o startup do HTTP.
+	go dbReconnectLoop(dsn)
+}
+
+// dbReconnectLoop tenta reconectar ao PostgreSQL indefinidamente, com backoff
+// exponencial (5s até um teto de 2min), até obter sucesso.
+func dbReconnectLoop(dsn string) {
+	backoff := 5 * time.Second
+	const maxBackoff = 2 * time.Minute
+	for {
+		log.Printf("Tentando reconectar ao PostgreSQL em %s...", backoff)
+		time.Sleep(backoff)
+		if connectDB(dsn) {
+			log.Println("PostgreSQL reconectado com sucesso")
+			go cleanupLoop()
+			return
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// connectDB abre a conexão e aplica as migrações; só publica em db se tudo
+// tiver sucesso. Retorna false sem alterar db em caso de qualquer falha.
+func connectDB(dsn string) bool {
+	conn, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Printf("Erro ao abrir PostgreSQL: %v", err)
+		return false
+	}
+	if err = conn.Ping(); err != nil {
+		log.Printf("Erro ao conectar ao PostgreSQL: %v", err)
+		conn.Close()
+		return false
+	}
+	conn.SetMaxOpenConns(10)
+	conn.SetMaxIdleConns(5)
+	conn.SetConnMaxLifetime(5 * time.Minute)
 
 	stmts := []string{
 		// captured_at e timestamp armazenados como TEXT ISO-8601 para compatibilidade com frontend
@@ -2342,14 +2376,15 @@ func initDB() {
 		)`,
 	}
 	for _, s := range stmts {
-		if _, err = db.Exec(s); err != nil {
+		if _, err = conn.Exec(s); err != nil {
 			log.Printf("Erro ao inicializar tabelas: %v — %.80s", err, s)
-			db = nil
-			return
+			conn.Close()
+			return false
 		}
 	}
-	go cleanupLoop()
+	db = conn
 	log.Println("PostgreSQL inicializado")
+	return true
 }
 
 func cleanupLoop() {
@@ -2483,6 +2518,62 @@ func mergeKubeconfigs(newYAML string) (*clientcmdapi.Config, error) {
 	for k, v := range newCfg.AuthInfos { existing.AuthInfos[k] = v }
 	for k, v := range newCfg.Contexts  { existing.Contexts[k]  = v }
 	return existing, nil
+}
+
+// removeClusterFromKubeconfig apaga o contexto (e seu cluster/authinfo, se não
+// usados por mais ninguém) do kubeconfig persistido — Secret em modo k8s, ou
+// arquivo local em modo standalone (docker-compose) — para que o cluster
+// removido não volte a ser registrado num restart do pod.
+func removeClusterFromKubeconfig(name string) error {
+	if localK8sClient == nil {
+		kubeconfigPath := os.Getenv("KUBECONFIG")
+		if kubeconfigPath == "" { kubeconfigPath = "/data/kubeconfig" }
+		raw, err := os.ReadFile(kubeconfigPath)
+		if err != nil {
+			if os.IsNotExist(err) { return nil }
+			return err
+		}
+		cfg, err := clientcmd.Load(raw)
+		if err != nil { return err }
+		if !deleteContextFromConfig(cfg, name) { return nil }
+		out, err := clientcmd.Write(*cfg)
+		if err != nil { return err }
+		return os.WriteFile(kubeconfigPath, out, 0600)
+	}
+
+	ctx := context.Background()
+	namespace := getOwnNamespace()
+	secretName := os.Getenv("KUBECONFIG_SECRET_NAME")
+	if secretName == "" { secretName = "pod-monitor-kubeconfig" }
+	secret, err := localK8sClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) { return nil }
+	if err != nil { return err }
+	cfg, err := clientcmd.Load(secret.Data["config"])
+	if err != nil { return err }
+	if !deleteContextFromConfig(cfg, name) { return nil }
+	out, err := clientcmd.Write(*cfg)
+	if err != nil { return err }
+	secret.Data["config"] = out
+	_, err = localK8sClient.CoreV1().Secrets(namespace).Update(ctx, secret, metav1.UpdateOptions{})
+	return err
+}
+
+// deleteContextFromConfig remove o contexto ctxName de cfg, junto com seu
+// cluster/authinfo caso não sejam referenciados por nenhum outro contexto.
+// Retorna false se o contexto não existia (nada a persistir).
+func deleteContextFromConfig(cfg *clientcmdapi.Config, ctxName string) bool {
+	ctxObj, ok := cfg.Contexts[ctxName]
+	if !ok { return false }
+	delete(cfg.Contexts, ctxName)
+	clusterInUse, authInUse := false, false
+	for _, c := range cfg.Contexts {
+		if c.Cluster == ctxObj.Cluster { clusterInUse = true }
+		if c.AuthInfo == ctxObj.AuthInfo { authInUse = true }
+	}
+	if !clusterInUse { delete(cfg.Clusters, ctxObj.Cluster) }
+	if !authInUse { delete(cfg.AuthInfos, ctxObj.AuthInfo) }
+	if cfg.CurrentContext == ctxName { cfg.CurrentContext = "" }
+	return true
 }
 
 func reloadCluster(kubeconfigYAML, contextName string) {
@@ -2686,13 +2777,16 @@ func handleAdminDeleteCluster(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, exists := clusters[body.Name]
-	if exists {
-		delete(clusters, body.Name)
-	}
-
 	if !exists {
 		http.Error(w, fmt.Sprintf("cluster %q não encontrado", body.Name), 404)
 		return
+	}
+	delete(clusters, body.Name)
+
+	// Sem isso, o cluster removido volta a ser registrado no próximo restart
+	// do pod, pois initClients() recarrega todos os contextos persistidos.
+	if err := removeClusterFromKubeconfig(body.Name); err != nil {
+		log.Printf("Aviso: não foi possível remover %q do kubeconfig persistido: %v", body.Name, err)
 	}
 
 	log.Printf("Cluster %q removido por %s", body.Name, claims.Username)
