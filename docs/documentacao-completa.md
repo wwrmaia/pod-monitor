@@ -2188,6 +2188,20 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 26. Changelog
 
+### v0.6.0 — 2026-07-17
+
+#### Novas funcionalidades
+- **Menu em barra lateral** — botão no header alterna o menu de módulos entre o layout no topo (padrão) e uma barra lateral vertical fixa, estilo Datadog. Preferência persiste em `localStorage` por navegador; nenhum comportamento muda para quem não trocar.
+
+#### Correções
+- **Reconexão do PostgreSQL com backoff** — `initDB()` não tentava novamente após falha de conexão na subida (ex.: DNS do cluster ainda não pronto), deixando dashboards/histórico/usuários sem persistência até um restart manual do pod. Agora reconecta em segundo plano com backoff exponencial (5s até teto de 2min).
+- **Exclusão de cluster agora persiste** — `handleAdminDeleteCluster` só removia o cluster do mapa em memória, sem atualizar o kubeconfig persistido (Secret ou arquivo local), fazendo clusters de teste já removidos pela UI voltarem a cada restart do pod. Agora o contexto/cluster/authinfo também é removido do kubeconfig persistido.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.6.0`, `wwrmaia/pod-monitor-frontend:0.6.0`
+- Helm chart: `version: 0.6.0`, `appVersion: "0.6.0"`
+- Helm chart OCI: `oci://registry-1.docker.io/wwrmaia/pod-monitor:0.6.0`
+
 ### v0.5.0 — 2026-07-05
 
 #### Novas funcionalidades
