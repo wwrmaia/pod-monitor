@@ -2188,6 +2188,16 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 26. Changelog
 
+### v0.6.1 — 2026-07-17
+
+#### Correções
+- **CSP bloqueava Google Fonts** — a Content-Security-Policy do Nginx (`frontend/nginx.conf`) não liberava `fonts.googleapis.com`/`fonts.gstatic.com`, fazendo o navegador rejeitar o stylesheet do Google Fonts e cair para a fonte padrão do sistema. Adicionadas as duas origens ao `style-src`/`font-src`, mantendo o resto da política restritiva.
+
+#### Infraestrutura
+- Imagem Docker Hub: `wwrmaia/pod-monitor-frontend:0.6.1` (backend inalterado, permanece em `:0.6.0`)
+- Helm chart: `version: 0.6.1`, `appVersion: "0.6.1"`
+- Helm chart OCI: `oci://registry-1.docker.io/wwrmaia/pod-monitor:0.6.1`
+
 ### v0.6.0 — 2026-07-17
 
 #### Novas funcionalidades
