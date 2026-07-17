@@ -42,6 +42,7 @@ services:
 
   backend:
     image: wwrmaia/pod-monitor-backend:latest
+    pull_policy: always
     container_name: pod-monitor-backend
     restart: unless-stopped
     environment:
@@ -63,6 +64,7 @@ services:
 
   frontend:
     image: wwrmaia/pod-monitor-frontend:latest
+    pull_policy: always
     container_name: pod-monitor-frontend
     restart: unless-stopped
     ports:
