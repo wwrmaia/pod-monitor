@@ -2192,6 +2192,7 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 #### Correções
 - **CSP bloqueava Google Fonts** — a Content-Security-Policy do Nginx (`frontend/nginx.conf`) não liberava `fonts.googleapis.com`/`fonts.gstatic.com`, fazendo o navegador rejeitar o stylesheet do Google Fonts e cair para a fonte padrão do sistema. Adicionadas as duas origens ao `style-src`/`font-src`, mantendo o resto da política restritiva.
+- **`docker-compose.hub.yml` subia versão desatualizada** — `docker compose up` não repuxa uma tag `:latest` se já existe uma imagem local com esse nome, então instalações antigas ficavam presas numa versão anterior (sem a sidebar, sem os fixes de reconexão/cluster) mesmo com imagens novas publicadas no Docker Hub. Adicionado `pull_policy: always` nos serviços `backend`/`frontend`.
 
 #### Infraestrutura
 - Imagem Docker Hub: `wwrmaia/pod-monitor-frontend:0.6.1` (backend inalterado, permanece em `:0.6.0`)
