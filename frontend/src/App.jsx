@@ -2719,6 +2719,8 @@ export default function App() {
   const themeRef = useRef(null)
   const [theme,     setTheme]     = useState(() => localStorage.getItem('pm_theme') || 'dark')
   const [themeOpen, setThemeOpen] = useState(false)
+  const [navLayout, setNavLayout] = useState(() => localStorage.getItem('pm_nav_layout') || 'top')
+  useEffect(() => { localStorage.setItem('pm_nav_layout', navLayout) }, [navLayout])
 
   // Language
   const [lang, setLang] = useState(() => localStorage.getItem('pm_lang') || 'pt')
@@ -3717,6 +3719,27 @@ export default function App() {
             {lang === 'pt' ? 'EN' : 'PT'}
           </button>
 
+          <button
+            className='theme-toggle'
+            onClick={() => setNavLayout(l => l === 'top' ? 'sidebar' : 'top')}
+            title={navLayout === 'top' ? t('navLayoutSidebar') : t('navLayoutTop')}>
+            {navLayout === 'top' ? (
+              <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2'>
+                <rect x='3' y='4' width='7' height='16' rx='1.5'/>
+                <line x1='14' y1='7' x2='21' y2='7'/>
+                <line x1='14' y1='12' x2='21' y2='12'/>
+                <line x1='14' y1='17' x2='21' y2='17'/>
+              </svg>
+            ) : (
+              <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2'>
+                <rect x='3' y='3' width='18' height='4' rx='1.5'/>
+                <line x1='6' y1='11' x2='18' y2='11'/>
+                <line x1='6' y1='15' x2='18' y2='15'/>
+                <line x1='6' y1='19' x2='18' y2='19'/>
+              </svg>
+            )}
+          </button>
+
           <div className='theme-picker-wrap' ref={themeRef}>
             <button className='theme-toggle' onClick={() => setThemeOpen(o => !o)} title={t('themesBtn')}>
               <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2'>
@@ -3763,13 +3786,14 @@ export default function App() {
         </div>
       )}
 
-      <nav className='tabs'>
-        {visibleTabs.map(t => (
-          <button key={t.id} className={`tab-btn ${activeTab === t.id ? 'active' : ''}`} onClick={() => setActiveTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
-      </nav>
+      <div className={`app-body ${navLayout === 'sidebar' ? 'sidebar-layout' : ''}`}>
+        <nav className={navLayout === 'sidebar' ? 'tabs-sidebar' : 'tabs'}>
+          {visibleTabs.map(t => (
+            <button key={t.id} className={`tab-btn ${activeTab === t.id ? 'active' : ''}`} onClick={() => setActiveTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </nav>
 
       <main className='app-main'>
 
@@ -5104,6 +5128,7 @@ export default function App() {
         )}
 
       </main>
+      </div>
     </div>
   )
 }

@@ -544,6 +544,8 @@ export const translations = {
     settingsBtn: 'Configurações',
     helpBtn: 'Ajuda / Documentação',
     themesBtn: 'Temas',
+    navLayoutSidebar: 'Mudar para menu em barra lateral',
+    navLayoutTop: 'Mudar para menu no topo',
     logoutBtn: 'Sair',
     manageUsersMenu: 'Gerenciar Usuários',
 
@@ -1263,6 +1265,8 @@ export const translations = {
     settingsBtn: 'Settings',
     helpBtn: 'Help / Documentation',
     themesBtn: 'Themes',
+    navLayoutSidebar: 'Switch to sidebar menu',
+    navLayoutTop: 'Switch to top menu',
     logoutBtn: 'Logout',
     manageUsersMenu: 'Manage Users',
 

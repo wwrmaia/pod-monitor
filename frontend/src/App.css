@@ -1029,6 +1029,42 @@ body {
   border-bottom-color: var(--tab-underline);
 }
 
+/* ── Layout do menu: topo (padrão) vs. barra lateral ── */
+.app-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.app-body.sidebar-layout {
+  display: flex;
+  align-items: stretch;
+}
+.tabs-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 210px;
+  flex-shrink: 0;
+  padding: 14px 10px;
+  gap: 2px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+}
+.tabs-sidebar .tab-btn {
+  position: static;
+  bottom: auto;
+  text-align: left;
+  border-radius: 8px;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  border-left: 3px solid transparent;
+}
+.tabs-sidebar .tab-btn:hover  { color: var(--text-tabh); background: var(--ctrl-hover); }
+.tabs-sidebar .tab-btn.active {
+  color: var(--text-taba);
+  background: var(--tab-active-bg);
+  border-left-color: var(--accent);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    MAIN CONTENT
    ═══════════════════════════════════════════════════════════════════════════ */
