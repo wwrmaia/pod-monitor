@@ -844,6 +844,11 @@ function getHelpTopics(lang) {
 const SEVERITY_COLOR = { critical: '#f87171', warning: '#fbbf24', info: '#60a5fa' }
 const SEVERITY_BG    = { critical: 'rgba(248,113,113,0.10)', warning: 'rgba(251,191,36,0.10)', info: 'rgba(96,165,250,0.10)' }
 
+// buckets de certificado por dias restantes: ok > 30 > notice > 15 > warning > 7 > critical > 0 > expired
+const CERT_BUCKET_COLOR = { ok: '#4ade80', notice: '#60a5fa', warning: '#fbbf24', critical: '#f87171', expired: '#dc2626' }
+const CERT_BUCKET_LABEL_KEY = { ok: 'certBucketOk', notice: 'certBucketNotice', warning: 'certBucketWarning', critical: 'certBucketCritical', expired: 'certBucketExpired' }
+const WEBHOOK_TYPE_LABEL_KEY = { generic: 'webhookTypeGeneric', telegram: 'webhookTypeTelegram', teams: 'webhookTypeTeams', email: 'webhookTypeEmail' }
+
 function AnalysisTab({ clusters, lang }) {
   const t = useT(lang || 'pt')
   const CATEGORY_LABEL = t('categoryLabels') || { security: 'Segurança', reliability: 'Confiabilidade', resources: 'Recursos', 'best-practices': 'Boas Práticas' }
@@ -2804,6 +2809,7 @@ export default function App() {
     { id: 'analysis',   label: tabLabels.analysis    || 'Análise',       roles: 'adminOrReader' },
     { id: 'topology',   label: tabLabels.topology    || 'Topologia',     roles: 'adminOrReader' },
     { id: 'quotas',     label: tabLabels.quotas      || 'Quotas',        roles: 'adminOrReader' },
+    { id: 'certificates', label: tabLabels.certificates || 'Certificados', roles: 'adminOrReader' },
     { id: 'logs',       label: tabLabels.logs        || 'Logs',          roles: 'devOrAdmin'    },
     { id: 'nodes',      label: tabLabels.nodes       || 'Nodes',         roles: 'admin'         },
     { id: 'admin',      label: tabLabels.admin       || 'Admin',         roles: 'admin'         },
@@ -3169,6 +3175,26 @@ export default function App() {
       .finally(() => setTop10Loading(false))
   }, [top10Cluster])
 
+  // certificados — estado independente
+  const [certCluster,  setCertCluster]  = useState('')
+  const [certList,     setCertList]     = useState([])
+  const [certLoading,  setCertLoading]  = useState(false)
+  const [certError,    setCertError]    = useState('')
+
+  useEffect(() => {
+    if (activeTab !== 'certificates') return
+    if (!certCluster && cluster) setCertCluster(cluster)
+  }, [activeTab, cluster])
+
+  useEffect(() => {
+    if (!certCluster) return
+    setCertLoading(true); setCertError('')
+    axios.get(`/api/certificates?cluster=${certCluster}`)
+      .then(({ data }) => setCertList(data || []))
+      .catch(() => setCertError(t('errorApiConsult')))
+      .finally(() => setCertLoading(false))
+  }, [certCluster])
+
   const topOffenders = useMemo(() =>
     top10Pods
       .flatMap(pod => pod.containers.map(c => ({
@@ -3486,10 +3512,15 @@ export default function App() {
   const [webhooks,     setWebhooks]     = useState([])
   const [whLoad,       setWhLoad]       = useState(false)
   const [whMsg,        setWhMsg]        = useState({ type: '', text: '' })
-  const [whForm,       setWhForm]       = useState({ id: 0, name: '', url: '', events: 'critical', enabled: true })
+  const whFormDefault = { id: 0, name: '', url: '', events: 'critical', enabled: true, type: 'generic', config: {} }
+  const [whForm,       setWhForm]       = useState(whFormDefault)
 
   async function loadWebhooks() {
     try { const { data } = await axios.get('/api/webhooks'); setWebhooks(data || []) } catch {}
+  }
+
+  function setWhConfigField(key, value) {
+    setWhForm(f => ({ ...f, config: { ...f.config, [key]: value } }))
   }
 
   async function saveWebhook() {
@@ -3497,7 +3528,7 @@ export default function App() {
     try {
       await axios.post('/api/webhooks', whForm)
       setWhMsg({ type: 'ok', text: t('webhookSaved') })
-      setWhForm({ id: 0, name: '', url: '', events: 'critical', enabled: true })
+      setWhForm(whFormDefault)
       loadWebhooks()
     } catch (err) {
       setWhMsg({ type: 'error', text: err.response?.data?.error || t('webhookError') })
@@ -3512,11 +3543,11 @@ export default function App() {
     } catch {}
   }
 
-  async function testWebhook(url) {
+  async function testWebhook(wh) {
     setWhMsg({ type: '', text: '' })
     try {
-      const { data } = await axios.post('/api/webhooks/test', { url })
-      setWhMsg({ type: 'ok', text: `Teste enviado! Status HTTP: ${data.status}` })
+      const { data } = await axios.post('/api/webhooks/test', { type: wh.type || 'generic', url: wh.url, config: wh.config || {} })
+      setWhMsg({ type: 'ok', text: `Teste enviado! Status HTTP: ${data.status || 'OK'}` })
     } catch (err) {
       const msg = err.response?.data || err.message
       setWhMsg({ type: 'error', text: `Erro no teste: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}` })
@@ -4938,6 +4969,57 @@ export default function App() {
           </>
         )}
 
+        {/* ── CERTIFICADOS TLS ─────────────────────────────────────────── */}
+        {activeTab === 'certificates' && (
+          <>
+            <div className='controls'>
+              <select value={certCluster} onChange={e => setCertCluster(e.target.value)}>
+                <option value=''>{t('clusterPlaceholder')}</option>
+                {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <button
+                disabled={!certCluster || certLoading}
+                onClick={() => { const c = certCluster; setCertCluster(''); setTimeout(() => setCertCluster(c), 0) }}
+              >{certLoading ? t('consultingBtn') : t('refreshBtn')}</button>
+            </div>
+            {certError && <div className='error-box'>{certError}</div>}
+            {certLoading ? (
+              <div className='table-wrap'><div className='empty'>{t('loadingData')}</div></div>
+            ) : !certCluster ? (
+              <div className='table-wrap'><div className='empty'>{t('selectClusterForAnalysis')}</div></div>
+            ) : certList.length === 0 ? (
+              <div className='table-wrap'><div className='empty'>{t('certNoData')}</div></div>
+            ) : (
+              <div className='table-wrap'>
+                <div className='top10-title'>{t('certTitle')}</div>
+                <table>
+                  <thead><tr>
+                    <th>{t('thNamespace')}</th><th>{t('certSecretName')}</th><th>{t('certCommonName')}</th>
+                    <th>{t('certExpiresIn')}</th><th>{t('certBucket')}</th>
+                  </tr></thead>
+                  <tbody>
+                    {[...certList].sort((a, b) => a.days_left - b.days_left).map((c, i) => (
+                      <tr key={i}>
+                        <td>{c.namespace}</td>
+                        <td>{c.secret_name}</td>
+                        <td>{c.common_name || '-'}</td>
+                        <td>{c.days_left}d</td>
+                        <td>
+                          <span style={{
+                            display: 'inline-block', padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                            background: CERT_BUCKET_COLOR[c.bucket] + '22', color: CERT_BUCKET_COLOR[c.bucket],
+                            border: `1px solid ${CERT_BUCKET_COLOR[c.bucket]}55`,
+                          }}>{t(CERT_BUCKET_LABEL_KEY[c.bucket] || 'certBucketOk')}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+
         {/* ── ADMIN (extras: audit, webhooks, thresholds) ───────────────── */}
         {activeTab === 'admin' && isAdmin && (
           <div style={{ marginTop: '2rem' }}>
@@ -5020,7 +5102,8 @@ export default function App() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '1rem', fontSize: 12 }}>
                     <thead><tr>
                       <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('webhookName')}</th>
-                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('webhookUrl')}</th>
+                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('webhookType')}</th>
+                      <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('webhookDestination')}</th>
                       <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('webhookEvents')}</th>
                       <th style={{ textAlign: 'center', padding: '4px 8px' }}>{t('webhookEnabled')}</th>
                       <th></th>
@@ -5029,13 +5112,18 @@ export default function App() {
                       {webhooks.map(wh => (
                         <tr key={wh.id} style={{ borderTop: '1px solid var(--border)' }}>
                           <td style={{ padding: '4px 8px' }}><strong>{wh.name}</strong></td>
-                          <td style={{ padding: '4px 8px', fontFamily: 'monospace', fontSize: 10 }}>{wh.url}</td>
+                          <td style={{ padding: '4px 8px' }}>{t(WEBHOOK_TYPE_LABEL_KEY[wh.type] || 'webhookTypeGeneric')}</td>
+                          <td style={{ padding: '4px 8px', fontFamily: 'monospace', fontSize: 10 }}>
+                            {wh.type === 'telegram' ? wh.config?.chat_id
+                              : wh.type === 'email' ? wh.config?.to
+                              : wh.url}
+                          </td>
                           <td style={{ padding: '4px 8px' }}><span className='badge caution'>{wh.events}</span></td>
                           <td style={{ padding: '4px 8px', textAlign: 'center' }}>
                             {wh.enabled ? <span className='badge ok'>✓</span> : <span className='badge'>✗</span>}
                           </td>
                           <td style={{ padding: '4px 8px', textAlign: 'right', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button className='admin-link' style={{ color: 'var(--accent)' }} onClick={() => testWebhook(wh.url)}>
+                            <button className='admin-link' style={{ color: 'var(--accent)' }} onClick={() => testWebhook(wh)}>
                               {t('webhookTest') || 'Testar'}
                             </button>
                             <button className='admin-link' style={{ color: 'var(--alert)' }} onClick={() => deleteWebhook(wh.id)}>
@@ -5053,17 +5141,78 @@ export default function App() {
                     <input type='text' placeholder={t('webhookNamePlaceholder')} value={whForm.name}
                       onChange={e => setWhForm(f => ({ ...f, name: e.target.value }))} />
                   </div>
-                  <div className='admin-field' style={{ flex: 2 }}>
-                    <label>{t('webhookUrl')}</label>
-                    <input type='url' placeholder={t('webhookUrlPlaceholder')} value={whForm.url}
-                      onChange={e => setWhForm(f => ({ ...f, url: e.target.value }))} />
+                  <div className='admin-field' style={{ width: 150 }}>
+                    <label>{t('webhookType')}</label>
+                    <select value={whForm.type} onChange={e => setWhForm(f => ({ ...f, type: e.target.value }))}>
+                      <option value='generic'>{t('webhookTypeGeneric')}</option>
+                      <option value='telegram'>{t('webhookTypeTelegram')}</option>
+                      <option value='teams'>{t('webhookTypeTeams')}</option>
+                      <option value='email'>{t('webhookTypeEmail')}</option>
+                    </select>
                   </div>
+                  {(whForm.type === 'generic' || whForm.type === 'teams') && (
+                    <div className='admin-field' style={{ flex: 2 }}>
+                      <label>{t('webhookUrl')}</label>
+                      <input type='url' placeholder={t('webhookUrlPlaceholder')} value={whForm.url}
+                        onChange={e => setWhForm(f => ({ ...f, url: e.target.value }))} />
+                    </div>
+                  )}
+                  {whForm.type === 'telegram' && (
+                    <>
+                      <div className='admin-field'>
+                        <label>{t('webhookBotToken')}</label>
+                        <input type='text' value={whForm.config.bot_token || ''}
+                          onChange={e => setWhConfigField('bot_token', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('webhookChatId')}</label>
+                        <input type='text' value={whForm.config.chat_id || ''}
+                          onChange={e => setWhConfigField('chat_id', e.target.value)} />
+                      </div>
+                    </>
+                  )}
+                  {whForm.type === 'email' && (
+                    <>
+                      <div className='admin-field'>
+                        <label>{t('webhookSmtpHost')}</label>
+                        <input type='text' value={whForm.config.smtp_host || ''}
+                          onChange={e => setWhConfigField('smtp_host', e.target.value)} />
+                      </div>
+                      <div className='admin-field' style={{ width: 90 }}>
+                        <label>{t('webhookSmtpPort')}</label>
+                        <input type='text' placeholder='587' value={whForm.config.smtp_port || ''}
+                          onChange={e => setWhConfigField('smtp_port', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('webhookSmtpUser')}</label>
+                        <input type='text' value={whForm.config.smtp_user || ''}
+                          onChange={e => setWhConfigField('smtp_user', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('webhookSmtpPass')}</label>
+                        <input type='password' value={whForm.config.smtp_pass || ''}
+                          onChange={e => setWhConfigField('smtp_pass', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('webhookFrom')}</label>
+                        <input type='email' value={whForm.config.from || ''}
+                          onChange={e => setWhConfigField('from', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('webhookTo')}</label>
+                        <input type='email' value={whForm.config.to || ''}
+                          onChange={e => setWhConfigField('to', e.target.value)} />
+                      </div>
+                    </>
+                  )}
                   <div className='admin-field' style={{ width: 150 }}>
                     <label>{t('webhookEvents')}</label>
                     <select value={whForm.events} onChange={e => setWhForm(f => ({ ...f, events: e.target.value }))}>
                       <option value='critical'>{t('webhookEventCritical')}</option>
                       <option value='warning'>{t('webhookEventWarning')}</option>
                       <option value='critical,warning'>{t('webhookEventBoth')}</option>
+                      <option value='cert_expiring_30,cert_expiring_15,cert_expiring_7,cert_expired'>{t('webhookEventCerts')}</option>
+                      <option value='*'>{t('webhookEventAll')}</option>
                     </select>
                   </div>
                   <div className='admin-field' style={{ width: 80 }}>
@@ -5072,7 +5221,8 @@ export default function App() {
                       onChange={e => setWhForm(f => ({ ...f, enabled: e.target.checked }))} />
                   </div>
                 </div>
-                <button className='admin-btn' onClick={saveWebhook} disabled={whLoad || !whForm.url.trim()}>
+                <button className='admin-btn' onClick={saveWebhook}
+                  disabled={whLoad || ((whForm.type === 'generic' || whForm.type === 'teams') && !whForm.url.trim())}>
                   {whLoad ? t('webhookSaving') : t('webhookSave')}
                 </button>
               </div>

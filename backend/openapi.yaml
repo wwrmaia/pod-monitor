@@ -144,9 +144,30 @@ components:
       properties:
         id:      { type: integer }
         name:    { type: string }
-        url:     { type: string }
+        url:     { type: string, description: "URL de destino (generic/teams); ignorado para type=email" }
         events:  { type: string, description: "Comma-separated event types, or '*' for all" }
         enabled: { type: boolean }
+        type:    { type: string, enum: [generic, telegram, teams, email], default: generic }
+        config:
+          type: object
+          description: >
+            Campos específicos do tipo — telegram: bot_token, chat_id;
+            email: smtp_host, smtp_port, smtp_user, smtp_pass, from, to.
+            Campos sensíveis (bot_token, smtp_pass) voltam mascarados como "********" nas leituras.
+          additionalProperties: { type: string }
+
+    CertificateInfo:
+      type: object
+      properties:
+        cluster:     { type: string }
+        namespace:   { type: string }
+        secret_name: { type: string }
+        common_name: { type: string }
+        sans:        { type: array, items: { type: string } }
+        issuer:      { type: string }
+        not_after:   { type: string, format: date-time }
+        days_left:   { type: integer }
+        bucket:      { type: string, enum: [ok, notice, warning, critical, expired] }
 
     User:
       type: object
@@ -1163,12 +1184,33 @@ paths:
           application/json:
             schema:
               type: object
-              required: [url]
+              description: "url é obrigatória para type=generic/teams; ignorada para telegram/email"
               properties:
-                url: { type: string }
+                type:   { type: string, enum: [generic, telegram, teams, email], default: generic }
+                url:    { type: string }
+                config: { type: object, additionalProperties: { type: string } }
       responses:
         "200":
           description: Resultado do teste
+
+  /api/certificates:
+    get:
+      summary: Listar certificados TLS (Secrets kubernetes.io/tls) do cluster, classificados por dias restantes
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CertificateInfo' }
 
   /api/thresholds:
     get:

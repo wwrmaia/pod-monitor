@@ -9,15 +9,19 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"math"
 	"net"
 	"net/http"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -97,6 +101,18 @@ type PVCInfo struct {
 	StorageClass string `json:"storage_class"`
 	Volume      string `json:"volume"`
 	AccessModes string `json:"access_modes"`
+}
+
+type CertInfo struct {
+	Cluster    string   `json:"cluster"`
+	Namespace  string   `json:"namespace"`
+	SecretName string   `json:"secret_name"`
+	CommonName string   `json:"common_name"`
+	SANs       []string `json:"sans"`
+	Issuer     string   `json:"issuer"`
+	NotAfter   string   `json:"not_after"`
+	DaysLeft   int      `json:"days_left"`
+	Bucket     string   `json:"bucket"` // ok | notice | warning | critical | expired
 }
 
 type PagedResponse[T any] struct {
@@ -2256,6 +2272,7 @@ func initDB() {
 	}
 	if connectDB(dsn) {
 		go cleanupLoop()
+		go certScanLoop()
 		return
 	}
 	// Falha na subida (ex.: DNS do cluster ainda não pronto) não deve deixar o
@@ -2275,6 +2292,7 @@ func dbReconnectLoop(dsn string) {
 		if connectDB(dsn) {
 			log.Println("PostgreSQL reconectado com sucesso")
 			go cleanupLoop()
+			go certScanLoop()
 			return
 		}
 		if backoff *= 2; backoff > maxBackoff {
@@ -2373,6 +2391,17 @@ func connectDB(dsn string) bool {
 			url     TEXT NOT NULL,
 			events  TEXT NOT NULL DEFAULT 'critical',
 			enabled INTEGER NOT NULL DEFAULT 1
+		)`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS type   TEXT NOT NULL DEFAULT 'generic'`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS config TEXT NOT NULL DEFAULT '{}'`,
+		`CREATE TABLE IF NOT EXISTS cert_alerts_sent (
+			id          BIGSERIAL PRIMARY KEY,
+			cluster     TEXT NOT NULL,
+			namespace   TEXT NOT NULL,
+			secret_name TEXT NOT NULL,
+			bucket      TEXT NOT NULL,
+			sent_at     TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			UNIQUE(cluster, namespace, secret_name, bucket)
 		)`,
 	}
 	for _, s := range stmts {
@@ -3010,6 +3039,149 @@ func handleStorage(w http.ResponseWriter, r *http.Request) {
 	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// ── Certificados TLS ────────────────────────────────────────────────────────────
+
+func certBucket(daysLeft int) string {
+	switch {
+	case daysLeft <= 0:
+		return "expired"
+	case daysLeft <= 7:
+		return "critical"
+	case daysLeft <= 15:
+		return "warning"
+	case daysLeft <= 30:
+		return "notice"
+	default:
+		return "ok"
+	}
+}
+
+func scanTLSCerts(clients *clusterClients, namespace string) ([]CertInfo, error) {
+	ctx := context.Background()
+	secrets, err := clients.k8s.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "type=kubernetes.io/tls",
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	result := []CertInfo{}
+	for _, s := range secrets.Items {
+		raw, ok := s.Data["tls.crt"]
+		if !ok {
+			continue
+		}
+		block, _ := pem.Decode(raw)
+		if block == nil {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		daysLeft := int(cert.NotAfter.Sub(now).Hours() / 24)
+		result = append(result, CertInfo{
+			Namespace:  s.Namespace,
+			SecretName: s.Name,
+			CommonName: cert.Subject.CommonName,
+			SANs:       cert.DNSNames,
+			Issuer:     cert.Issuer.CommonName,
+			NotAfter:   cert.NotAfter.UTC().Format(time.RFC3339),
+			DaysLeft:   daysLeft,
+			Bucket:     certBucket(daysLeft),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].DaysLeft < result[j].DaysLeft })
+	return result, nil
+}
+
+func handleCertificates(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsCtxKey).(*TokenClaims)
+	clients, clusterName, err := getCluster(r)
+	if err != nil { http.Error(w, err.Error(), 400); return }
+	if claims != nil && !devAllowedCluster(claims, clusterName) {
+		http.Error(w, "Forbidden", 403); return
+	}
+	ns := r.URL.Query().Get("namespace")
+	if claims != nil && ns != "" && !devAllowedNamespace(claims, ns) {
+		http.Error(w, "Forbidden", 403); return
+	}
+	certs, err := scanTLSCerts(clients, ns)
+	if err != nil { http.Error(w, err.Error(), 500); return }
+	for i := range certs {
+		certs[i].Cluster = clusterName
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(certs)
+}
+
+// certEventName mapeia o bucket de severidade pro nome do evento de webhook —
+// vazio para "ok", que não deve gerar notificação.
+func certEventName(bucket string) string {
+	switch bucket {
+	case "notice":
+		return "cert_expiring_30"
+	case "warning":
+		return "cert_expiring_15"
+	case "critical":
+		return "cert_expiring_7"
+	case "expired":
+		return "cert_expired"
+	}
+	return ""
+}
+
+// scanCertsForAlerts roda periodicamente e dispara webhooks só na transição pra
+// um bucket pior (dedupe via cert_alerts_sent); um certificado renovado (volta a
+// "ok") limpa seu histórico pra poder alertar de novo numa expiração futura.
+func scanCertsForAlerts() {
+	if db == nil {
+		return
+	}
+	for _, name := range clusterNames() {
+		clients, ok := clusters[name]
+		if !ok {
+			continue
+		}
+		certs, err := scanTLSCerts(clients, "")
+		if err != nil {
+			log.Printf("scan de certificados falhou no cluster %s: %v", name, err)
+			continue
+		}
+		for _, c := range certs {
+			if c.Bucket == "ok" {
+				db.Exec(`DELETE FROM cert_alerts_sent WHERE cluster=$1 AND namespace=$2 AND secret_name=$3`,
+					name, c.Namespace, c.SecretName)
+				continue
+			}
+			res, err := db.Exec(`INSERT INTO cert_alerts_sent (cluster, namespace, secret_name, bucket) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+				name, c.Namespace, c.SecretName, c.Bucket)
+			if err != nil {
+				continue
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
+			}
+			c.Cluster = name
+			triggerWebhooks(certEventName(c.Bucket), c)
+		}
+	}
+}
+
+func certScanLoop() {
+	interval := 1 * time.Hour
+	if v := os.Getenv("CERT_SCAN_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			interval = d
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		scanCertsForAlerts()
+	}
 }
 
 func resourceAge(t time.Time) string {
@@ -4269,11 +4441,13 @@ type AuditEntry struct {
 }
 
 type WebhookConfig struct {
-	ID      int64  `json:"id"`
-	Name    string `json:"name"`
-	URL     string `json:"url"`
-	Events  string `json:"events"`
-	Enabled bool   `json:"enabled"`
+	ID      int64           `json:"id"`
+	Name    string          `json:"name"`
+	URL     string          `json:"url"`
+	Events  string          `json:"events"`
+	Enabled bool            `json:"enabled"`
+	Type    string          `json:"type"`   // generic | telegram | teams | email
+	Config  json.RawMessage `json:"config"` // campos específicos do tipo (bot_token/chat_id, smtp_*)
 }
 
 type TopologyNode struct {
@@ -4432,13 +4606,50 @@ func handleAuditLog(w http.ResponseWriter, r *http.Request) {
 
 // ── Webhooks ──────────────────────────────────────────────────────────────────
 
+// whSensitiveFields são as chaves de Config que nunca voltam em texto puro pro
+// frontend — handleGetWebhooks mascara, handleSaveWebhook reconstitui a partir
+// do valor salvo quando recebe o placeholder de volta (evita uma tabela de
+// segredos separada nesse app de arquivo único).
+var whSensitiveFields = map[string]bool{"bot_token": true, "smtp_pass": true}
+
+const whMaskPlaceholder = "********"
+
+func normalizeWHConfig(raw json.RawMessage) map[string]string {
+	cfg := map[string]string{}
+	if len(raw) > 0 {
+		json.Unmarshal(raw, &cfg)
+	}
+	return cfg
+}
+
+func maskWHConfig(cfgJSON string) json.RawMessage {
+	m := normalizeWHConfig(json.RawMessage(cfgJSON))
+	for k := range whSensitiveFields {
+		if m[k] != "" {
+			m[k] = whMaskPlaceholder
+		}
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+func mergeWHSecrets(existingJSON string, incoming map[string]string) map[string]string {
+	existing := normalizeWHConfig(json.RawMessage(existingJSON))
+	for k := range whSensitiveFields {
+		if incoming[k] == whMaskPlaceholder {
+			incoming[k] = existing[k]
+		}
+	}
+	return incoming
+}
+
 func handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]WebhookConfig{})
 		return
 	}
-	rows, err := db.Query(`SELECT id, name, url, events, enabled FROM webhooks ORDER BY id`)
+	rows, err := db.Query(`SELECT id, name, url, events, enabled, type, config FROM webhooks ORDER BY id`)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -4448,8 +4659,10 @@ func handleGetWebhooks(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var wh WebhookConfig
 		var enabled int
-		rows.Scan(&wh.ID, &wh.Name, &wh.URL, &wh.Events, &enabled)
+		var cfgRaw string
+		rows.Scan(&wh.ID, &wh.Name, &wh.URL, &wh.Events, &enabled, &wh.Type, &cfgRaw)
 		wh.Enabled = enabled == 1
+		wh.Config = maskWHConfig(cfgRaw)
 		result = append(result, wh)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -4466,7 +4679,10 @@ func handleSaveWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload inválido", 400)
 		return
 	}
-	if wh.URL == "" {
+	if wh.Type == "" {
+		wh.Type = "generic"
+	}
+	if (wh.Type == "generic" || wh.Type == "teams") && wh.URL == "" {
 		http.Error(w, "url obrigatória", 400)
 		return
 	}
@@ -4474,23 +4690,31 @@ func handleSaveWebhook(w http.ResponseWriter, r *http.Request) {
 	if wh.Enabled {
 		enabled = 1
 	}
+	cfgMap := normalizeWHConfig(wh.Config)
 	claims := r.Context().Value(claimsCtxKey).(*TokenClaims)
 	if wh.ID == 0 {
-		res, err := db.Exec(`INSERT INTO webhooks (name, url, events, enabled) VALUES ($1,$2,$3,$4)`,
-			wh.Name, wh.URL, wh.Events, enabled)
+		cfgBytes, _ := json.Marshal(cfgMap)
+		res, err := db.Exec(`INSERT INTO webhooks (name, url, events, enabled, type, config) VALUES ($1,$2,$3,$4,$5,$6)`,
+			wh.Name, wh.URL, wh.Events, enabled, wh.Type, string(cfgBytes))
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		wh.ID, _ = res.LastInsertId()
+		wh.Config = maskWHConfig(string(cfgBytes))
 		auditLog(claims.Username, claims.Role, "webhook_create", wh.Name+" "+wh.URL, r.RemoteAddr)
 	} else {
-		_, err := db.Exec(`UPDATE webhooks SET name=$1, url=$2, events=$3, enabled=$4 WHERE id=$5`,
-			wh.Name, wh.URL, wh.Events, enabled, wh.ID)
+		var existingCfg string
+		db.QueryRow(`SELECT config FROM webhooks WHERE id=$1`, wh.ID).Scan(&existingCfg)
+		cfgMap = mergeWHSecrets(existingCfg, cfgMap)
+		cfgBytes, _ := json.Marshal(cfgMap)
+		_, err := db.Exec(`UPDATE webhooks SET name=$1, url=$2, events=$3, enabled=$4, type=$5, config=$6 WHERE id=$7`,
+			wh.Name, wh.URL, wh.Events, enabled, wh.Type, string(cfgBytes), wh.ID)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		wh.Config = maskWHConfig(string(cfgBytes))
 		auditLog(claims.Username, claims.Role, "webhook_update", wh.Name+" "+wh.URL, r.RemoteAddr)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -4513,18 +4737,28 @@ func handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-// dispatchWebhook envia o payload para url com até 3 tentativas e backoff exponencial.
+// sendHTTPOnce faz uma única tentativa de POST — usado tanto como a tentativa
+// individual dentro de postWithRetry quanto pelo teste de webhook (que precisa
+// responder rápido pro usuário, sem esperar o backoff completo).
+func sendHTTPOnce(url, contentType string, payload []byte) (int, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(url, contentType, bytes.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// postWithRetry envia o payload para url com até 3 tentativas e backoff exponencial.
 // Retentar em: erro de rede, timeout, HTTP 5xx.
 // Não retentar em: HTTP 4xx (erro do cliente — URL errada, auth inválida, etc.).
 var webhookBackoff = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
-func dispatchWebhook(url string, payload []byte) {
-	client := &http.Client{Timeout: 10 * time.Second}
+func postWithRetry(url, contentType string, payload []byte) {
 	for attempt, delay := range webhookBackoff {
-		resp, err := client.Post(url, "application/json", strings.NewReader(string(payload)))
+		code, err := sendHTTPOnce(url, contentType, payload)
 		if err == nil {
-			code := resp.StatusCode
-			resp.Body.Close()
 			if code < 500 {
 				if code >= 400 {
 					log.Printf("webhook %s recusado (HTTP %d) — sem retry", url, code)
@@ -4542,22 +4776,138 @@ func dispatchWebhook(url string, payload []byte) {
 	log.Printf("webhook %s abandonado após 3 tentativas", url)
 }
 
+func telegramRequest(cfg map[string]string, text string) (string, []byte, error) {
+	botToken, chatID := cfg["bot_token"], cfg["chat_id"]
+	if botToken == "" || chatID == "" {
+		return "", nil, fmt.Errorf("bot_token/chat_id não configurado")
+	}
+	payload, err := json.Marshal(map[string]string{"chat_id": chatID, "text": text})
+	if err != nil {
+		return "", nil, err
+	}
+	return fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken), payload, nil
+}
+
+func teamsPayload(title, text string) []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"@type":    "MessageCard",
+		"@context": "http://schema.org/extensions",
+		"summary":  title,
+		"title":    title,
+		"text":     text,
+	})
+	return b
+}
+
+// sendEmailOnce faz uma única tentativa de envio SMTP; usa TLS direto na porta
+// 465 (SMTPS) e STARTTLS implícito via net/smtp.SendMail nas demais (ex.: 587).
+func sendEmailOnce(cfg map[string]string, subject, body string) error {
+	host, port := cfg["smtp_host"], cfg["smtp_port"]
+	user, pass := cfg["smtp_user"], cfg["smtp_pass"]
+	from, to := cfg["from"], cfg["to"]
+	if host == "" || port == "" || from == "" || to == "" {
+		return fmt.Errorf("configuração SMTP incompleta")
+	}
+	addr := host + ":" + port
+	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
+		from, to, subject, body))
+	var auth smtp.Auth
+	if user != "" {
+		auth = smtp.PlainAuth("", user, pass, host)
+	}
+	if port == "465" {
+		return sendEmailTLS(addr, host, auth, from, []string{to}, msg)
+	}
+	return smtp.SendMail(addr, auth, from, []string{to}, msg)
+}
+
+func sendEmailTLS(addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host})
+	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	for _, addr := range to {
+		if err := client.Rcpt(addr); err != nil {
+			return err
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(msg); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
+// dispatchEmailAsync faz 1 retentativa apenas (sem backoff longo): SMTP é
+// síncrono por natureza, então segurar a goroutine por minutos não compensa.
+func dispatchEmailAsync(cfg map[string]string, subject, body string) {
+	if err := sendEmailOnce(cfg, subject, body); err != nil {
+		log.Printf("email falhou, tentativa 1/2: %v — nova tentativa em 30s", err)
+		time.Sleep(30 * time.Second)
+		if err2 := sendEmailOnce(cfg, subject, body); err2 != nil {
+			log.Printf("email abandonado após 2 tentativas: %v", err2)
+		}
+	}
+}
+
+func humanizeEvent(eventName string, payloadObj interface{}) (subject, body string) {
+	data, _ := json.Marshal(payloadObj)
+	switch eventName {
+	case "critical":
+		return "Alerta crítico — Pod Monitor", fmt.Sprintf("Alerta crítico de uso de recursos.\n%s", data)
+	case "warning":
+		return "Alerta de aviso — Pod Monitor", fmt.Sprintf("Alerta de aviso de uso de recursos.\n%s", data)
+	case "audit":
+		return "Evento de auditoria — Pod Monitor", string(data)
+	case "cert_expiring_30":
+		return "Certificado expira em 30 dias — Pod Monitor", fmt.Sprintf("Certificado próximo do vencimento.\n%s", data)
+	case "cert_expiring_15":
+		return "Certificado expira em 15 dias — Pod Monitor", fmt.Sprintf("Certificado próximo do vencimento.\n%s", data)
+	case "cert_expiring_7":
+		return "Certificado expira em 7 dias — Pod Monitor", fmt.Sprintf("Certificado prestes a vencer.\n%s", data)
+	case "cert_expired":
+		return "Certificado expirado — Pod Monitor", fmt.Sprintf("Certificado expirado.\n%s", data)
+	default:
+		return "Evento Pod Monitor: " + eventName, string(data)
+	}
+}
+
 func triggerWebhooks(eventName string, payloadObj interface{}) {
-	if db == nil {
+	if db == nil || eventName == "" {
 		return
 	}
-	rows, err := db.Query(`SELECT url FROM webhooks WHERE enabled=1 AND (events='*' OR strpos(events,$1)>0)`, eventName)
+	rows, err := db.Query(`SELECT url, type, config FROM webhooks WHERE enabled=1 AND (events='*' OR strpos(events,$1)>0)`, eventName)
 	if err != nil {
 		return
 	}
-	var urls []string
+	type whRow struct{ url, typ, cfg string }
+	var whs []whRow
 	for rows.Next() {
-		var u string
-		rows.Scan(&u)
-		urls = append(urls, u)
+		var wr whRow
+		rows.Scan(&wr.url, &wr.typ, &wr.cfg)
+		whs = append(whs, wr)
 	}
 	rows.Close()
-	if len(urls) == 0 {
+	if len(whs) == 0 {
 		return
 	}
 	payload, err := json.Marshal(map[string]interface{}{
@@ -4568,8 +4918,24 @@ func triggerWebhooks(eventName string, payloadObj interface{}) {
 	if err != nil {
 		return
 	}
-	for _, u := range urls {
-		go dispatchWebhook(u, payload)
+	subject, body := humanizeEvent(eventName, payloadObj)
+	for _, wr := range whs {
+		switch wr.typ {
+		case "telegram":
+			cfg := normalizeWHConfig(json.RawMessage(wr.cfg))
+			if url, tgPayload, err := telegramRequest(cfg, body); err == nil {
+				go postWithRetry(url, "application/json", tgPayload)
+			} else {
+				log.Printf("webhook telegram ignorado: %v", err)
+			}
+		case "teams":
+			go postWithRetry(wr.url, "application/json", teamsPayload(subject, body))
+		case "email":
+			cfg := normalizeWHConfig(json.RawMessage(wr.cfg))
+			go dispatchEmailAsync(cfg, subject, body)
+		default:
+			go postWithRetry(wr.url, "application/json", payload)
+		}
 	}
 }
 
@@ -5186,33 +5552,62 @@ func handleWebhooksRouter(w http.ResponseWriter, r *http.Request) {
 
 func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URL string `json:"url"`
+		Type   string          `json:"type"`
+		URL    string          `json:"url"`
+		Config json.RawMessage `json:"config"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
-		http.Error(w, "url obrigatória", 400)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "payload inválido", 400)
 		return
 	}
-	payload, _ := json.Marshal(map[string]interface{}{
-		"event":     "test",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"data": map[string]interface{}{
-			"message":   "Webhook de teste do Pod Monitor",
-			"namespace": "default",
-			"pod":       "exemplo-pod-abc123",
-			"container": "app",
-			"resource":  "cpu",
-			"usagePct":  95.2,
-		},
-	})
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(req.URL, "application/json", bytes.NewReader(payload))
+	if req.Type == "" {
+		req.Type = "generic"
+	}
+	cfg := normalizeWHConfig(req.Config)
+	subject, body := "Teste Pod Monitor", "Webhook de teste do Pod Monitor"
+
+	var status int
+	var err error
+	switch req.Type {
+	case "telegram":
+		var url string
+		var payload []byte
+		if url, payload, err = telegramRequest(cfg, body); err == nil {
+			status, err = sendHTTPOnce(url, "application/json", payload)
+		}
+	case "teams":
+		if req.URL == "" {
+			http.Error(w, "url obrigatória", 400)
+			return
+		}
+		status, err = sendHTTPOnce(req.URL, "application/json", teamsPayload(subject, body))
+	case "email":
+		err = sendEmailOnce(cfg, subject, body)
+	default:
+		if req.URL == "" {
+			http.Error(w, "url obrigatória", 400)
+			return
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"event":     "test",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"data": map[string]interface{}{
+				"message":   body,
+				"namespace": "default",
+				"pod":       "exemplo-pod-abc123",
+				"container": "app",
+				"resource":  "cpu",
+				"usagePct":  95.2,
+			},
+		})
+		status, err = sendHTTPOnce(req.URL, "application/json", payload)
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Erro ao enviar: %v", err), 502)
 		return
 	}
-	resp.Body.Close()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "status": resp.StatusCode})
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "status": status})
 }
 
 // ── Health check ─────────────────────────────────────────────────────────────
@@ -5323,6 +5718,7 @@ func main() {
 	http.HandleFunc("/api/resources",  authMiddleware(handleResources))
 	http.HandleFunc("/api/nodes",      readerOrAdminOnly(handleNodes))
 	http.HandleFunc("/api/storage",    readerOrAdminOnly(handleStorage))
+	http.HandleFunc("/api/certificates", readerOrAdminOnly(handleCertificates))
 	http.HandleFunc("/api/orphans",    readerOrAdminOnly(handleOrphans))
 	http.HandleFunc("/api/history",     readerOrAdminOnly(handleHistory))
 	http.HandleFunc("/api/history/csv", readerOrAdminOnly(handleHistoryCSV))
