@@ -1743,11 +1743,28 @@ kubectl delete -f k8s/example-quota.yaml   # remover após testes
 
 ### Como funciona
 
-O backend dispara um HTTP POST para cada webhook habilitado sempre que o endpoint `/api/dashboard/summary` detecta pods acima do threshold configurado, e também para cada operação registrada no audit log (`events="audit"`). Os disparos são assíncronos (goroutine por URL) e não bloqueiam a resposta ao frontend.
+O backend dispara um alerta para cada webhook habilitado sempre que o endpoint `/api/dashboard/summary` detecta pods acima do threshold configurado, para cada operação registrada no audit log (`events="audit"`), e — a partir da v0.7.0 — para cada certificado TLS que entra em um bucket de expiração (ver [seção 19](#19-monitoramento-de-certificados-tls)). Os disparos são assíncronos (goroutine por destino) e não bloqueiam a resposta ao frontend.
+
+### Canais suportados (v0.7.0+)
+
+Além do HTTP genérico original, webhooks agora suportam 4 tipos, selecionáveis em Admin → Webhooks:
+
+| Tipo | Transporte | Configuração necessária |
+|------|-----------|--------------------------|
+| **Genérico** | HTTP POST, JSON | URL |
+| **Telegram** | Telegram Bot API | `bot_token`, `chat_id` |
+| **Microsoft Teams** | Incoming Webhook (MessageCard) | URL do webhook do canal |
+| **E-mail** | SMTP (STARTTLS na 587, TLS direto na 465) | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_pass`, `from`, `to` |
+
+Campos sensíveis (`bot_token`, `smtp_pass`) nunca voltam em texto puro do backend — a API retorna `********` no lugar. Ao editar um webhook existente sem alterar esses campos, o valor real salvo é preservado automaticamente (o backend resolve o segredo real pelo `id` do webhook, tanto ao salvar quanto ao testar).
+
+### E-mails de alerta em HTML
+
+A partir da v0.7.0, o canal de e-mail envia um corpo em **HTML** (cartão colorido por severidade, dados em pares rótulo/valor) em vez do JSON cru usado até a v0.6.x — pensado para chegar de forma legível também pra quem não é do time técnico (gestão, diretoria). Telegram e Teams continuam recebendo texto plano.
 
 ### Retry com backoff exponencial
 
-A partir da v0.4.0, cada disparo de webhook tem até **3 tentativas** com backoff exponencial:
+Cada disparo HTTP (genérico, Telegram, Teams) tem até **3 tentativas** com backoff exponencial:
 
 | Tentativa | Aguarda antes da próxima |
 |-----------|--------------------------|
@@ -1756,20 +1773,25 @@ A partir da v0.4.0, cada disparo de webhook tem até **3 tentativas** com backof
 | 3ª falha  | abandona, loga erro |
 
 **Retentar em:** erro de rede, timeout, HTTP 5xx (servidor indisponível).  
-**Não retentar em:** HTTP 4xx — URL incorreta, autenticação inválida, recurso não encontrado. Repetir não resolveria o problema.
+**Não retentar em:** HTTP 4xx — URL incorreta, autenticação inválida, recurso não encontrado.
 
-Cada URL configurada roda em goroutine independente — uma URL lenta não bloqueia as demais.
+O canal de e-mail (SMTP é síncrono por natureza) usa uma política mais simples: 1 nova tentativa após 30s em caso de falha.
+
+Cada destino configurado roda em goroutine independente — um destino lento não bloqueia os demais.
 
 ### Configuração (Admin → Webhooks)
 
 | Campo | Descrição |
 |-------|-----------|
 | Nome | Identificador legível |
-| URL | Endpoint HTTP destino |
-| Eventos | `critical`, `warning` ou ambos |
+| Tipo | `generic`, `telegram`, `teams` ou `email` |
+| URL / Config | URL (genérico/Teams) ou campos específicos do tipo (Telegram/e-mail) |
+| Eventos | `critical`, `warning`, ambos, os 4 eventos de certificado, ou `*` (todos) |
 | Ativo | Liga/desliga sem excluir |
 
-### Payload
+A partir da v0.7.0, um webhook existente pode ser **editado** diretamente (botão "Editar" na tabela) — não é mais necessário excluir e recriar pra mudar qualquer campo.
+
+### Payload (canal genérico)
 
 ```json
 {
@@ -1804,19 +1826,21 @@ Cada URL configurada roda em goroutine independente — uma URL lenta não bloqu
 
 ### Validação
 
-1. Cadastre a URL (ex: `webhook.site`) em Admin → Webhooks
-2. Clique em **Testar** — o backend faz o POST imediatamente e retorna o status HTTP
-3. Verifique o payload recebido no destino
+1. Cadastre o webhook (tipo + destino) em Admin → Webhooks
+2. Clique em **Testar** — o backend envia imediatamente pelo canal escolhido e retorna o resultado
+3. Verifique a entrega no destino (payload no endpoint, mensagem no Telegram/Teams, ou e-mail recebido)
 
 ### Endpoint de teste
 
 ```
 POST /api/webhooks/test
-{ "url": "https://..." }
+{ "id": 0, "type": "generic", "url": "https://...", "config": {} }
 
 → 200 OK: { "ok": true, "status": 200 }
-→ 502 Bad Gateway: erro de conexão
+→ 502 Bad Gateway: erro de conexão/envio
 ```
+
+`id` é opcional — quando informado (testando um webhook já salvo), o backend resolve os campos sensíveis mascarados (`********`) para o valor real gravado no banco antes de tentar o envio.
 
 ---
 
@@ -1853,7 +1877,61 @@ Os thresholds configuram tanto os alertas do Dashboard (`DashSummary.Alerts`) qu
 
 ---
 
-## 19. Log de Auditoria
+## 19. Monitoramento de Certificados TLS
+
+*Adicionado na v0.7.0.*
+
+### Como funciona
+
+O backend escaneia os Secrets do tipo `kubernetes.io/tls` de cada cluster/namespace monitorado, decodifica o certificado (`tls.crt`) e calcula os dias restantes até `NotAfter`. Cada certificado é classificado em um bucket de severidade:
+
+| Bucket | Condição (dias restantes) |
+|--------|---------------------------|
+| `ok` | > 30 |
+| `notice` | ≤ 30 |
+| `warning` | ≤ 15 |
+| `critical` | ≤ 7 |
+| `expired` | ≤ 0 |
+
+### Aba Certificados (frontend)
+
+Nova aba no menu principal, disponível pra `admin` e `reader`. Lista os certificados do cluster/namespace selecionado, com o bucket exibido como badge colorido (mesma paleta usada nos alertas por e-mail).
+
+### Endpoint
+
+```
+GET /api/certificates?cluster=X&namespace=Y   (namespace opcional)
+
+→ [
+    {
+      "cluster": "minikube",
+      "namespace": "producao",
+      "secret_name": "api-tls",
+      "common_name": "api.empresa.com",
+      "sans": ["api.empresa.com"],
+      "issuer": "Let's Encrypt",
+      "not_after": "2026-09-15T00:00:00Z",
+      "days_left": 12,
+      "bucket": "warning"
+    }
+  ]
+```
+
+### Scan periódico e alertas automáticos
+
+Um loop em background (`certScanLoop`) reescaneia todos os clusters registrados periodicamente — padrão **1 hora**, configurável via a variável de ambiente `CERT_SCAN_INTERVAL` do backend (ex: `CERT_SCAN_INTERVAL=15m`).
+
+A cada scan, um webhook é disparado **apenas na transição para um bucket pior** — um certificado que já alertou como `warning` não gera um novo alerta em todo scan seguinte enquanto continuar em `warning`. O controle de deduplicação fica na tabela `cert_alerts_sent` (chave: cluster + namespace + secret + bucket). Quando o certificado é renovado e volta pro bucket `ok`, o histórico de dedupe é limpo — uma expiração futura vai alertar normalmente de novo.
+
+Eventos disparados (usar em Admin → Webhooks → Eventos): `cert_expiring_30`, `cert_expiring_15`, `cert_expiring_7`, `cert_expired`, ou `*` pra todos.
+
+### RBAC necessário
+
+Nenhuma mudança de permissão é necessária em instalações existentes — a ClusterRole do backend já concede `get`/`list` em `secrets` (usado também por outras funcionalidades, como leitura de Secrets de configuração). Ver `k8s/rbac.yaml` / `helm/pod-monitor/templates/rbac.yaml`.
+
+---
+
+## 20. Log de Auditoria
 
 ### Visão geral
 
@@ -1906,7 +1984,7 @@ Retorna as `N` entradas mais recentes (máximo configurável na UI de 50 a 1000)
 
 ---
 
-## 20. Atualizações em Tempo Real (SSE)
+## 21. Atualizações em Tempo Real (SSE)
 
 ### Visão geral
 
@@ -1949,7 +2027,7 @@ Cache-Control: no-cache
 
 ---
 
-## 21. Aviso de Expiração de Sessão
+## 22. Aviso de Expiração de Sessão
 
 ### Comportamento
 
@@ -1971,7 +2049,7 @@ O frontend decodifica o campo `exp` do JWT (sem biblioteca externa — apenas `a
 
 ---
 
-## 22. Modo NOC — Rotação Automática
+## 23. Modo NOC — Rotação Automática
 
 O **Modo NOC** permite que o Pod Monitor funcione como painel autônomo em NOCs, salas de operação ou TVs de monitoramento, alternando automaticamente entre clusters e módulos sem interação manual.
 
@@ -2026,7 +2104,7 @@ As configurações são salvas no `localStorage` do navegador e sobrevivem a rel
 
 ---
 
-## 23. Segurança
+## 24. Segurança
 
 ### Medidas implementadas (v0.4.0)
 
@@ -2108,7 +2186,7 @@ A análise detalhada de segurança, comparação com ferramentas de mercado e ro
 
 ---
 
-## 24. Paginação de APIs
+## 25. Paginação de APIs
 
 ### Visão geral
 
@@ -2144,7 +2222,7 @@ Sem o parâmetro `page`, a resposta continua sendo um array JSON simples (compor
 
 ---
 
-## 25. Documentação OpenAPI / Swagger UI
+## 26. Documentação OpenAPI / Swagger UI
 
 ### Spec OpenAPI 3.0
 
@@ -2176,7 +2254,7 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 | Auth | Login, logout, MFA (setup, validar, reset) |
 | Admin | Usuários, grupos, clusters, docker hosts |
 | Clusters | Listar clusters e namespaces |
-| Resources | Pods, nós, storage, logs, análise, quotas, topologia |
+| Resources | Pods, nós, storage, logs, análise, quotas, topologia, certificados TLS |
 | Docker | Hosts Docker/Podman externos e containers |
 | Helm | Releases e Deployments |
 | History | Snapshots históricos e exportação CSV |
@@ -2186,7 +2264,24 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ---
 
-## 26. Changelog
+## 27. Changelog
+
+### v0.7.0 — 2026-08-27
+
+#### Novas funcionalidades
+- **Monitoramento de certificados TLS** — nova aba "Certificados" lista os Secrets `kubernetes.io/tls` do cluster/namespace selecionado, classificados por dias restantes até o vencimento (`ok`/`notice`/`warning`/`critical`/`expired`). Um scan periódico em background (`CERT_SCAN_INTERVAL`, padrão 1h) dispara webhooks automaticamente na transição pra um bucket pior, com deduplicação — ver [seção 19](#19-monitoramento-de-certificados-tls).
+- **Webhooks multi-canal** — além do HTTP genérico, Admin → Webhooks agora suporta **Telegram**, **Microsoft Teams** e **e-mail (SMTP)**. Campos sensíveis (`bot_token`, `smtp_pass`) são mascarados nas respostas da API.
+- **E-mails de alerta em HTML** — o canal de e-mail passou a enviar um corpo em HTML com cartão colorido por severidade em vez de JSON cru, pensado pra ser lido também por quem não é do time técnico.
+- **Edição de webhook** — webhooks existentes agora podem ser editados diretamente (botão "Editar"), sem precisar excluir e recriar.
+
+#### Correções
+- **Teste de webhook falhava com credencial mascarada** — o botão "Testar" de um webhook já salvo reenviava o placeholder `********` no lugar da senha/token real (já que a listagem de webhooks sempre vem mascarada), fazendo o teste de e-mail/Telegram falhar mesmo com credenciais corretas. O backend agora resolve o segredo real a partir do `id` do webhook quando presente na requisição de teste.
+- **Validação de URL obrigatória excluía Telegram indevidamente** — só `email` estava isento da exigência de URL; `telegram` também não usa URL (usa `bot_token`/`chat_id`) e ficava impossível de salvar.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.7.0`, `wwrmaia/pod-monitor-frontend:0.7.0`
+- Helm chart: `version: 0.7.0`, `appVersion: "0.7.0"`
+- Nenhuma mudança de RBAC necessária — a ClusterRole já concedia `get`/`list` em `secrets`.
 
 ### v0.6.1 — 2026-07-17
 

@@ -57,6 +57,10 @@ spec:
             - name: FRONTEND_ORIGIN
               value: {{ .Values.backend.frontendOrigin | quote }}
             {{- end }}
+            {{- if .Values.backend.certScanInterval }}
+            - name: CERT_SCAN_INTERVAL
+              value: {{ .Values.backend.certScanInterval | quote }}
+            {{- end }}
             {{- if .Values.backend.docker.enabled }}
             - name: DOCKER_HOSTS
               value: {{ .Values.backend.docker.hosts | quote }}

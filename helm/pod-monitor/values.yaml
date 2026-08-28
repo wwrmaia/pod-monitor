@@ -29,6 +29,10 @@ backend:
   # Leave empty to allow any origin (not recommended for production).
   frontendOrigin: ""
 
+  # CERT_SCAN_INTERVAL controls how often TLS Secrets are rescanned for
+  # expiration alerts (e.g. "15m", "1h"). Leave empty for the 1h default.
+  certScanInterval: ""
+
   # Docker/Podman external host monitoring (optional)
   # Enable to monitor containers running outside the Kubernetes cluster.
   docker:
