@@ -2,5 +2,5 @@ apiVersion: v2
 name: pod-monitor
 description: Kubernetes resource monitoring dashboard
 type: application
-version: 0.8.0
-appVersion: "0.8.0"
+version: 0.9.0
+appVersion: "0.9.0"

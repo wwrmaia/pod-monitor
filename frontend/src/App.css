@@ -700,6 +700,84 @@
   --backdrop:        blur(12px);
 }
 
+/* ── GTA VI (Vice City sunset: rosa/laranja sobre roxo-noite, turquesa de água) ── */
+[data-theme="gta6"] {
+  --body-bg:          #0a0618;
+  --surface:          rgba(21,10,40,0.95);
+  --surface-2:        rgba(30,15,52,0.9);
+  --surface-overlay:  #150a28;
+  --sidebar-bg:       #0a0618;
+  --input-bg:         rgba(0,0,0,0.45);
+  --thead-bg:         rgba(255,47,146,0.07);
+  --row-hover:        rgba(255,47,146,0.04);
+  --alert-row:        rgba(255,56,96,0.08);
+  --ctrl-bg:          rgba(255,47,146,0.08);
+  --ctrl-hover:       rgba(255,47,146,0.16);
+  --tab-bar:          rgba(0,0,0,0.55);
+  --tab-active-bg:    rgba(255,47,146,0.1);
+  --tab-active-bdr:   rgba(255,47,146,0.25);
+  --tab-underline:    #0a0618;
+
+  --border:           rgba(255,47,146,0.2);
+  --border-soft:      rgba(255,47,146,0.09);
+  --border-input:     rgba(255,47,146,0.25);
+  --border-focus:     rgba(46,230,214,0.75);
+
+  --text-1:    #fdf2ff;
+  --text-2:    #c9a8d6;
+  --text-3:    rgba(201,168,214,0.45);
+  --text-th:   #c9a8d6;
+  --text-td:   #f3e0ff;
+  --text-tab:  #c9a8d6;
+  --text-tabh: #fdf2ff;
+  --text-taba: #ff2f92;
+
+  --accent:         #ff2f92;
+  --accent-text:    #ff6fc2;
+  --accent-bg:      rgba(255,47,146,0.12);
+  --accent-border:  rgba(255,47,146,0.4);
+  --accent-btn:     linear-gradient(135deg, #ff2f92, #ff8a3d);
+  --accent-btn-bdr: rgba(255,47,146,0.5);
+
+  --indigo-bg:     rgba(46,230,214,0.12);
+  --indigo-border: rgba(46,230,214,0.35);
+  --indigo-text:   #2ee6d6;
+
+  --warning:        #ff8a3d;
+  --warning-bg:     rgba(255,138,61,0.12);
+  --warning-border: rgba(255,138,61,0.35);
+  --danger:         #ff3860;
+  --danger-bg:      rgba(255,56,96,0.1);
+  --danger-border:  rgba(255,56,96,0.3);
+  --danger-text:    #ff7a97;
+  --success:        #2ee6d6;
+  --success-bg:     rgba(46,230,214,0.12);
+  --success-border: rgba(46,230,214,0.25);
+  --success-text:   #7ff5ea;
+  --highlight:      #ffd23f;
+
+  --cluster-bg:     rgba(255,47,146,0.1);
+  --cluster-border: rgba(255,47,146,0.35);
+  --cluster-text:   #ff6fc2;
+
+  --role-admin-bg:      rgba(255,47,146,0.12);
+  --role-admin-color:   #ff6fc2;
+  --role-admin-border:  rgba(255,47,146,0.3);
+  --role-reader-bg:     rgba(46,230,214,0.12);
+  --role-reader-color:  #7ff5ea;
+  --role-reader-border: rgba(46,230,214,0.3);
+  --role-dev-bg:        rgba(255,138,61,0.12);
+  --role-dev-color:     #ffb676;
+  --role-dev-border:    rgba(255,138,61,0.3);
+
+  --opt-bg:          #150a28;
+  --card-shadow:     0 0 20px rgba(255,47,146,0.1);
+  --dropdown-shadow: 0 8px 28px rgba(0,0,0,0.8);
+  --scroll-thumb:    rgba(255,47,146,0.3);
+  --scroll-track:    rgba(255,47,146,0.05);
+  --backdrop:        blur(16px);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    GLOBAL
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -789,6 +867,10 @@ body {
 }
 [data-theme="solarized"] .app-header-text h1 {
   background: linear-gradient(90deg, #268bd2, #2aa198, #859900);
+  -webkit-background-clip: text; background-clip: text;
+}
+[data-theme="gta6"] .app-header-text h1 {
+  background: linear-gradient(90deg, #ff2f92, #ff8a3d, #2ee6d6);
   -webkit-background-clip: text; background-clip: text;
 }
 

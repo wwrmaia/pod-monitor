@@ -1259,6 +1259,12 @@ O tema é selecionado no cabeçalho e persistido em `localStorage`. Cada tema é
 | `tokyo` | Tokyo Night | Azul `#7aa2f7` |
 | `sop` | Shades of Purple | Amarelo `#FAD000` |
 | `cyberpunk` | Cyberpunk 2077 | Amarelo neon `#fff000` |
+| `tomorrow` | Tomorrow Night Blue | Azul `#64a8ff` |
+| `solarized` | Solarized Dark | Azul `#268bd2` |
+| `gta6` | GTA VI | Rosa `#ff2f92` |
+| `tokyo` | Tokyo Night | Azul `#7aa2f7` |
+| `sop` | Shades of Purple | Amarelo `#FAD000` |
+| `cyberpunk` | Cyberpunk 2077 | Amarelo neon `#fff000` |
 | `tomorrow` | Tomorrow Night Blue | Azul claro `#64a8ff` |
 | `solarized` | Solarized Dark | Azul `#268bd2` |
 
@@ -2278,6 +2284,15 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 ---
 
 ## 27. Changelog
+
+### v0.9.0 — 2026-08-28
+
+#### Novas funcionalidades
+- **Tema visual "GTA VI"** — 9º tema disponível no seletor de temas do cabeçalho, paleta rosa choque/laranja pôr-do-sol/turquesa sobre roxo-noite bem escuro. Mesmo padrão dos demais temas (variáveis CSS em `[data-theme="gta6"]`, `frontend/src/App.css`) — ver [seção 10](#10-temas-visuais).
+
+#### Infraestrutura
+- Imagem Docker Hub: `wwrmaia/pod-monitor-frontend:0.9.0` (backend inalterado, permanece em `:0.8.0`)
+- Helm chart: `version: 0.9.0`, `appVersion: "0.9.0"`
 
 ### v0.8.0 — 2026-08-28
 

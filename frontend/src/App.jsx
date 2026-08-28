@@ -809,6 +809,7 @@ const THEMES = [
   { id: 'cyberpunk',  label: 'Cyberpunk 2077',      color: '#fff000' },
   { id: 'tomorrow',   label: 'Tomorrow Night Blue', color: '#64a8ff' },
   { id: 'solarized',  label: 'Solarized Dark',      color: '#268bd2' },
+  { id: 'gta6',       label: 'GTA VI',              color: '#ff2f92' },
 ]
 
 // ── Documentação por perfil ──────────────────────────────────────────────────
