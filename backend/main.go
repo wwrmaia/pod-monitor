@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"html"
 	"log"
 	"math"
 	"net"
@@ -4809,7 +4810,7 @@ func sendEmailOnce(cfg map[string]string, subject, body string) error {
 		return fmt.Errorf("configuração SMTP incompleta")
 	}
 	addr := host + ":" + port
-	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
+	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n%s",
 		from, to, subject, body))
 	var auth smtp.Auth
 	if user != "" {
@@ -4891,6 +4892,124 @@ func humanizeEvent(eventName string, payloadObj interface{}) (subject, body stri
 	}
 }
 
+// emailCardHTML monta o card HTML usado em todos os e-mails de alerta — layout
+// simples o bastante pra ser lido por quem não é técnico (diretoria/gestão),
+// não só pelo time de infra.
+func emailCardHTML(headerColor, headerTitle, intro string, rows [][2]string) string {
+	var rowsHTML strings.Builder
+	for _, r := range rows {
+		rowsHTML.WriteString(fmt.Sprintf(
+			`<tr><td style="padding:6px 12px 6px 0;color:#888888;font-size:13px;width:150px;vertical-align:top;white-space:nowrap;">%s</td><td style="padding:6px 0;color:#222222;font-size:13px;font-weight:600;">%s</td></tr>`,
+			html.EscapeString(r[0]), html.EscapeString(r[1])))
+	}
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html><body style="margin:0;padding:24px;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;">
+<table role="presentation" width="100%%" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
+<tr><td style="background:%s;padding:16px 24px;">
+<span style="color:#ffffff;font-size:16px;font-weight:bold;">%s</span>
+</td></tr>
+<tr><td style="padding:24px;">
+<p style="margin:0 0 16px 0;color:#444444;font-size:14px;line-height:1.5;">%s</p>
+<table role="presentation" width="100%%" style="border-collapse:collapse;">%s</table>
+</td></tr>
+<tr><td style="padding:12px 24px;background:#fafafa;border-top:1px solid #eeeeee;">
+<span style="color:#999999;font-size:11px;">Pod Monitor — alerta automático, não responda este e-mail.</span>
+</td></tr>
+</table>
+</body></html>`, headerColor, html.EscapeString(headerTitle), html.EscapeString(intro), rowsHTML.String())
+}
+
+func certAlertColor(bucket string) string {
+	switch bucket {
+	case "ok":
+		return "#16a34a"
+	case "notice":
+		return "#2563eb"
+	case "warning":
+		return "#d97706"
+	case "critical":
+		return "#dc2626"
+	case "expired":
+		return "#991b1b"
+	default:
+		return "#6b7280"
+	}
+}
+
+// humanizeEventHTML monta o corpo em HTML usado só no canal de e-mail —
+// Telegram/Teams continuam recebendo o texto plano de humanizeEvent.
+func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string {
+	if c, ok := payloadObj.(CertInfo); ok {
+		notAfter := c.NotAfter
+		if t, err := time.Parse(time.RFC3339, c.NotAfter); err == nil {
+			notAfter = t.Local().Format("02/01/2006")
+		}
+		intro := "O certificado TLS abaixo precisa de atenção antes do vencimento."
+		if c.Bucket == "expired" {
+			intro = "O certificado TLS abaixo já expirou e precisa ser renovado com urgência."
+		}
+		rows := [][2]string{
+			{"Cluster", c.Cluster},
+			{"Namespace", c.Namespace},
+			{"Secret", c.SecretName},
+			{"Domínio (CN)", c.CommonName},
+			{"Emissor", c.Issuer},
+			{"Vencimento", fmt.Sprintf("%s (%d dias restantes)", notAfter, c.DaysLeft)},
+		}
+		return emailCardHTML(certAlertColor(c.Bucket), "🔒 "+subject, intro, rows)
+	}
+
+	data, _ := json.Marshal(payloadObj)
+	switch eventName {
+	case "critical", "warning":
+		var rap struct {
+			Cluster  string `json:"cluster"`
+			Critical int    `json:"critical"`
+			Warning  int    `json:"warning"`
+			Pods     []struct {
+				Pod       string `json:"pod"`
+				Namespace string `json:"namespace"`
+				Container string `json:"container"`
+				Reason    string `json:"reason"`
+				Severity  string `json:"severity"`
+			} `json:"pods"`
+		}
+		json.Unmarshal(data, &rap)
+		color, intro := "#d97706", "Foram detectados pods com uso de recursos em nível de aviso."
+		if eventName == "critical" {
+			color, intro = "#dc2626", "Foram detectados pods com uso de recursos em nível crítico."
+		}
+		rows := [][2]string{
+			{"Cluster", rap.Cluster},
+			{"Críticos", fmt.Sprintf("%d", rap.Critical)},
+			{"Avisos", fmt.Sprintf("%d", rap.Warning)},
+		}
+		max := len(rap.Pods)
+		if max > 6 {
+			max = 6
+		}
+		for _, pd := range rap.Pods[:max] {
+			rows = append(rows, [2]string{
+				pd.Namespace + " / " + pd.Pod,
+				fmt.Sprintf("%s — %s (%s)", pd.Container, pd.Reason, pd.Severity),
+			})
+		}
+		if len(rap.Pods) > max {
+			rows = append(rows, [2]string{"", fmt.Sprintf("+ %d outros pods", len(rap.Pods)-max)})
+		}
+		return emailCardHTML(color, "⚠ "+subject, intro, rows)
+	case "audit":
+		var a struct{ Username, Role, Action, Detail, IP string }
+		json.Unmarshal(data, &a)
+		rows := [][2]string{
+			{"Usuário", a.Username}, {"Papel", a.Role}, {"Ação", a.Action}, {"Detalhe", a.Detail}, {"IP", a.IP},
+		}
+		return emailCardHTML("#2563eb", "📋 "+subject, "Evento de auditoria registrado no Pod Monitor.", rows)
+	default:
+		return emailCardHTML("#6b7280", subject, "Evento do Pod Monitor.", [][2]string{{"Dados", string(data)}})
+	}
+}
+
 func triggerWebhooks(eventName string, payloadObj interface{}) {
 	if db == nil || eventName == "" {
 		return
@@ -4932,7 +5051,7 @@ func triggerWebhooks(eventName string, payloadObj interface{}) {
 			go postWithRetry(wr.url, "application/json", teamsPayload(subject, body))
 		case "email":
 			cfg := normalizeWHConfig(json.RawMessage(wr.cfg))
-			go dispatchEmailAsync(cfg, subject, body)
+			go dispatchEmailAsync(cfg, subject, humanizeEventHTML(eventName, subject, payloadObj))
 		default:
 			go postWithRetry(wr.url, "application/json", payload)
 		}
@@ -5552,6 +5671,7 @@ func handleWebhooksRouter(w http.ResponseWriter, r *http.Request) {
 
 func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ID     int64           `json:"id"`
 		Type   string          `json:"type"`
 		URL    string          `json:"url"`
 		Config json.RawMessage `json:"config"`
@@ -5564,6 +5684,13 @@ func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 		req.Type = "generic"
 	}
 	cfg := normalizeWHConfig(req.Config)
+	// testar um webhook já salvo manda o config mascarado (********) — troca
+	// os campos sensíveis pelo valor real gravado no banco antes de usar.
+	if req.ID != 0 && db != nil {
+		var existingCfg string
+		db.QueryRow(`SELECT config FROM webhooks WHERE id=$1`, req.ID).Scan(&existingCfg)
+		cfg = mergeWHSecrets(existingCfg, cfg)
+	}
 	subject, body := "Teste Pod Monitor", "Webhook de teste do Pod Monitor"
 
 	var status int
@@ -5582,7 +5709,8 @@ func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 		}
 		status, err = sendHTTPOnce(req.URL, "application/json", teamsPayload(subject, body))
 	case "email":
-		err = sendEmailOnce(cfg, subject, body)
+		testHTML := emailCardHTML("#2563eb", "✅ "+subject, "Este é um e-mail de teste do Pod Monitor. Se você recebeu esta mensagem, a configuração de SMTP está funcionando corretamente.", nil)
+		err = sendEmailOnce(cfg, subject, testHTML)
 	default:
 		if req.URL == "" {
 			http.Error(w, "url obrigatória", 400)

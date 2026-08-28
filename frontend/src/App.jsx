@@ -3523,11 +3523,24 @@ export default function App() {
     setWhForm(f => ({ ...f, config: { ...f.config, [key]: value } }))
   }
 
+  function editWebhook(wh) {
+    setWhMsg({ type: '', text: '' })
+    setWhForm({
+      id: wh.id, name: wh.name, url: wh.url || '', events: wh.events,
+      enabled: wh.enabled, type: wh.type || 'generic', config: { ...(wh.config || {}) },
+    })
+  }
+
+  function cancelEditWebhook() {
+    setWhMsg({ type: '', text: '' })
+    setWhForm(whFormDefault)
+  }
+
   async function saveWebhook() {
     setWhLoad(true); setWhMsg({ type: '', text: '' })
     try {
       await axios.post('/api/webhooks', whForm)
-      setWhMsg({ type: 'ok', text: t('webhookSaved') })
+      setWhMsg({ type: 'ok', text: whForm.id ? t('webhookUpdated') : t('webhookSaved') })
       setWhForm(whFormDefault)
       loadWebhooks()
     } catch (err) {
@@ -3546,7 +3559,7 @@ export default function App() {
   async function testWebhook(wh) {
     setWhMsg({ type: '', text: '' })
     try {
-      const { data } = await axios.post('/api/webhooks/test', { type: wh.type || 'generic', url: wh.url, config: wh.config || {} })
+      const { data } = await axios.post('/api/webhooks/test', { id: wh.id || 0, type: wh.type || 'generic', url: wh.url, config: wh.config || {} })
       setWhMsg({ type: 'ok', text: `Teste enviado! Status HTTP: ${data.status || 'OK'}` })
     } catch (err) {
       const msg = err.response?.data || err.message
@@ -5092,7 +5105,14 @@ export default function App() {
 
             {/* Webhooks */}
             <div className='admin-step active' style={{ marginBottom: '1.5rem' }}>
-              <div className='admin-step-title'>{t('webhooksTitle')}</div>
+              <div className='admin-step-title'>
+                {t('webhooksTitle')}
+                {whForm.id !== 0 && (
+                  <span style={{ marginLeft: 10, fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>
+                    {t('webhookEditingLabel')}{whForm.name}
+                  </span>
+                )}
+              </div>
               <div className='admin-step-body'>
                 <p style={{ color: 'var(--text-3)', fontSize: 12, marginBottom: '1rem' }}>{t('webhooksSubtitle')}</p>
                 {whMsg.text && <div className={`admin-msg ${whMsg.type}`} style={{ marginBottom: '1rem' }}>{whMsg.text}</div>}
@@ -5123,6 +5143,9 @@ export default function App() {
                             {wh.enabled ? <span className='badge ok'>✓</span> : <span className='badge'>✗</span>}
                           </td>
                           <td style={{ padding: '4px 8px', textAlign: 'right', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button className='admin-link' style={{ color: 'var(--accent)' }} onClick={() => editWebhook(wh)}>
+                              {t('webhookEdit')}
+                            </button>
                             <button className='admin-link' style={{ color: 'var(--accent)' }} onClick={() => testWebhook(wh)}>
                               {t('webhookTest') || 'Testar'}
                             </button>
@@ -5221,10 +5244,15 @@ export default function App() {
                       onChange={e => setWhForm(f => ({ ...f, enabled: e.target.checked }))} />
                   </div>
                 </div>
-                <button className='admin-btn' onClick={saveWebhook}
-                  disabled={whLoad || ((whForm.type === 'generic' || whForm.type === 'teams') && !whForm.url.trim())}>
-                  {whLoad ? t('webhookSaving') : t('webhookSave')}
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className='admin-btn' onClick={saveWebhook}
+                    disabled={whLoad || ((whForm.type === 'generic' || whForm.type === 'teams') && !whForm.url.trim())}>
+                    {whLoad ? t('webhookSaving') : (whForm.id ? t('webhookUpdate') : t('webhookSave'))}
+                  </button>
+                  {whForm.id !== 0 && (
+                    <button className='admin-link' onClick={cancelEditWebhook}>{t('webhookCancelEdit')}</button>
+                  )}
+                </div>
               </div>
             </div>
 
