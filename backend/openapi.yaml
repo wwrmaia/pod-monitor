@@ -169,6 +169,15 @@ components:
         days_left:   { type: integer }
         bucket:      { type: string, enum: [ok, notice, warning, critical, expired] }
 
+    CostConfig:
+      type: object
+      properties:
+        cluster:       { type: string, description: "vazio = preço default global" }
+        enabled:       { type: boolean, description: "default false — só faz sentido em cluster de nuvem com billing por hora" }
+        currency:      { type: string, example: BRL }
+        cpu_core_hour: { type: number, description: "preço por vCPU/hora" }
+        mem_gb_hour:   { type: number, description: "preço por GB/hora" }
+
     User:
       type: object
       properties:
@@ -1259,6 +1268,63 @@ paths:
       responses:
         "200":
           description: Threshold excluído
+
+  /api/costs:
+    get:
+      summary: Estimativa de custo por namespace (requests de CPU/memória × preço configurado)
+      tags: [Resources]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:    { type: boolean, description: "estimativa desativada por padrão para este cluster" }
+                  configured: { type: boolean }
+                  currency:   { type: string }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        namespace:  { type: string }
+                        cpu_cores:  { type: number }
+                        mem_gib:    { type: number }
+                        cost_hour:  { type: number }
+                        cost_month: { type: number }
+
+  /api/admin/cost-config:
+    get:
+      summary: Ler o preço configurado para estimativa de custo (admin)
+      tags: [Audit]
+      parameters:
+        - in: query
+          name: cluster
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CostConfig' }
+    post:
+      summary: Definir o preço por vCPU/hora e GB/hora usado na estimativa de custo (admin)
+      tags: [Audit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CostConfig' }
+      responses:
+        "200":
+          description: Configuração de custo salva
 
   # ── SSE ─────────────────────────────────────────────────────────────────────
   /api/sse/events:

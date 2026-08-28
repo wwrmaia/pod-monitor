@@ -1148,6 +1148,120 @@ function AnalysisTab({ clusters, lang }) {
   )
 }
 
+function CostsTab({ clusters, lang, user }) {
+  const t = useT(lang || 'pt')
+  const [costCluster, setCostCluster] = useState('')
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+
+  useEffect(() => {
+    if (clusters.length > 0 && !costCluster) setCostCluster(clusters[0])
+  }, [clusters])
+
+  function loadCosts() {
+    if (!costCluster) return
+    setLoading(true); setError(null)
+    axios.get('/api/costs', { params: { cluster: costCluster } })
+      .then(r => setData(r.data))
+      .catch(e => setError(e.response?.data || e.message))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { loadCosts() }, [costCluster])
+
+  const items = data?.items || []
+  const totals = items.reduce((acc, i) => ({
+    cpu: acc.cpu + i.cpu_cores, mem: acc.mem + i.mem_gib,
+    hour: acc.hour + i.cost_hour, month: acc.month + i.cost_month,
+  }), { cpu: 0, mem: 0, hour: 0, month: 0 })
+
+  const fmt = (n) => n.toLocaleString(lang === 'en' ? 'en-US' : 'pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const fmtMoney = (n) => `${data?.currency || 'BRL'} ${fmt(n)}`
+
+  return (
+    <div style={{ padding: '1rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.2rem', flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-1)' }}>{t('costsTitle')}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 2 }}>{t('costsSubtitle')}</div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <select value={costCluster} onChange={e => setCostCluster(e.target.value)} style={{ minWidth: 140 }}>
+            <option value=''>{t('clusterPlaceholder')}</option>
+            {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <button className='admin-btn' style={{ marginLeft: 'auto' }} onClick={loadCosts} disabled={loading || !costCluster}>
+          {loading ? t('costsLoading') : t('costsRefresh')}
+        </button>
+      </div>
+
+      {!costCluster && <div className='empty'>{t('costsSelectCluster')}</div>}
+
+      {error && (
+        <div style={{ color: '#f87171', background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '1rem' }}>
+          {typeof error === 'string' ? error : JSON.stringify(error)}
+        </div>
+      )}
+
+      {data && !data.enabled && (
+        <div style={{ color: 'var(--text-2)', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>{t('costsDisabled')}</span>
+          {user?.role === 'administration' && (
+            <span style={{ fontSize: 12, opacity: 0.8 }}>({t('costsGoToAdmin')})</span>
+          )}
+        </div>
+      )}
+
+      {data && data.enabled && !data.configured && (
+        <div style={{ color: 'var(--caution)', background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.25)', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>{t('costsNotConfigured')}</span>
+          {user?.role === 'administration' && (
+            <span style={{ fontSize: 12, opacity: 0.8 }}>({t('costsGoToAdmin')})</span>
+          )}
+        </div>
+      )}
+
+      {data && data.enabled && items.length === 0 && (
+        <div className='empty'>{t('costsEmpty')}</div>
+      )}
+
+      {data && items.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr>
+            <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('costsColNamespace')}</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px' }}>{t('costsColCpu')}</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px' }}>{t('costsColMem')}</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px' }}>{t('costsColHour')}</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px' }}>{t('costsColMonth')}</th>
+          </tr></thead>
+          <tbody>
+            {items.map(i => (
+              <tr key={i.namespace} style={{ borderTop: '1px solid var(--border)' }}>
+                <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{i.namespace}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmt(i.cpu_cores)}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmt(i.mem_gib)}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtMoney(i.cost_hour)}</td>
+                <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700 }}>{fmtMoney(i.cost_month)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ borderTop: '2px solid var(--border)' }}>
+              <td style={{ padding: '6px 8px', fontWeight: 700 }}>{t('costsTotalRow')}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700 }}>{fmt(totals.cpu)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700 }}>{fmt(totals.mem)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700 }}>{fmtMoney(totals.hour)}</td>
+              <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700 }}>{fmtMoney(totals.month)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      )}
+    </div>
+  )
+}
+
 function HelpModal({ role, onClose, lang }) {
   const tl = useT(lang || 'pt')
   const topics = getHelpTopics(lang || 'pt').filter(t => t.roles.includes(role))
@@ -2810,6 +2924,7 @@ export default function App() {
     { id: 'topology',   label: tabLabels.topology    || 'Topologia',     roles: 'adminOrReader' },
     { id: 'quotas',     label: tabLabels.quotas      || 'Quotas',        roles: 'adminOrReader' },
     { id: 'certificates', label: tabLabels.certificates || 'Certificados', roles: 'adminOrReader' },
+    { id: 'costs',      label: tabLabels.costs       || 'Custos',        roles: 'adminOrReader' },
     { id: 'logs',       label: tabLabels.logs        || 'Logs',          roles: 'devOrAdmin'    },
     { id: 'nodes',      label: tabLabels.nodes       || 'Nodes',         roles: 'admin'         },
     { id: 'admin',      label: tabLabels.admin       || 'Admin',         roles: 'admin'         },
@@ -2954,6 +3069,7 @@ export default function App() {
       if (isAdmin) {
         loadWebhooks()
         loadThresholds()
+        loadCostConfig()
         fetchAudit()
       }
     }
@@ -3595,6 +3711,28 @@ export default function App() {
       setThrMsg({ type: 'ok', text: t('thresholdDeleted') })
       loadThresholds()
     } catch {}
+  }
+
+  // cost config (FinOps)
+  const [costForm, setCostForm] = useState({ cluster: '', enabled: false, currency: 'BRL', cpu_core_hour: 0, mem_gb_hour: 0 })
+  const [costLoad, setCostLoad] = useState(false)
+  const [costMsg,  setCostMsg]  = useState({ type: '', text: '' })
+
+  async function loadCostConfig() {
+    try {
+      const { data } = await axios.get('/api/admin/cost-config')
+      setCostForm({ cluster: data.cluster || '', enabled: !!data.enabled, currency: data.currency || 'BRL', cpu_core_hour: data.cpu_core_hour || 0, mem_gb_hour: data.mem_gb_hour || 0 })
+    } catch {}
+  }
+
+  async function saveCostConfig() {
+    setCostLoad(true); setCostMsg({ type: '', text: '' })
+    try {
+      await axios.post('/api/admin/cost-config', costForm)
+      setCostMsg({ type: 'ok', text: t('costsSaved') })
+    } catch (err) {
+      setCostMsg({ type: 'error', text: err.response?.data || t('costsError') })
+    } finally { setCostLoad(false) }
   }
 
   // session timeout warning
@@ -4831,7 +4969,12 @@ export default function App() {
 
         {/* ── ANÁLISE ──────────────────────────────────────────────────── */}
         {activeTab === 'analysis' && (
-          <AnalysisTab clusters={clusters} />
+          <AnalysisTab clusters={clusters} lang={lang} />
+        )}
+
+        {/* ── CUSTOS ───────────────────────────────────────────────────── */}
+        {activeTab === 'costs' && (
+          <CostsTab clusters={clusters} lang={lang} user={user} />
         )}
 
         {/* ── TOPOLOGIA ────────────────────────────────────────────────── */}
@@ -5103,6 +5246,44 @@ export default function App() {
               </div>
             </div>
 
+            {/* Custos (FinOps) */}
+            <div className='admin-step active' style={{ marginBottom: '1.5rem' }}>
+              <div className='admin-step-title'>{t('costsAdminTitle')}</div>
+              <div className='admin-step-body'>
+                <p style={{ color: 'var(--text-3)', fontSize: 12, marginBottom: '1rem' }}>{t('costsAdminSubtitle')}</p>
+                {costMsg.text && <div className={`admin-msg ${costMsg.type}`} style={{ marginBottom: '1rem' }}>{costMsg.text}</div>}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '1rem', cursor: 'pointer' }}>
+                  <input type='checkbox' checked={costForm.enabled}
+                    onChange={e => setCostForm(f => ({ ...f, enabled: e.target.checked }))} />
+                  {t('costsEnableToggle')}
+                </label>
+                <div className='admin-fields' style={{ opacity: costForm.enabled ? 1 : 0.5 }}>
+                  <div className='admin-field' style={{ width: 100 }}>
+                    <label>{t('costsCurrency')}</label>
+                    <select value={costForm.currency} disabled={!costForm.enabled}
+                      onChange={e => setCostForm(f => ({ ...f, currency: e.target.value }))}>
+                      <option value='BRL'>BRL</option>
+                      <option value='USD'>USD</option>
+                      <option value='EUR'>EUR</option>
+                    </select>
+                  </div>
+                  <div className='admin-field'>
+                    <label>{t('costsCpuPrice')}</label>
+                    <input type='number' min={0} step={0.0001} value={costForm.cpu_core_hour} disabled={!costForm.enabled}
+                      onChange={e => setCostForm(f => ({ ...f, cpu_core_hour: +e.target.value }))} />
+                  </div>
+                  <div className='admin-field'>
+                    <label>{t('costsMemPrice')}</label>
+                    <input type='number' min={0} step={0.0001} value={costForm.mem_gb_hour} disabled={!costForm.enabled}
+                      onChange={e => setCostForm(f => ({ ...f, mem_gb_hour: +e.target.value }))} />
+                  </div>
+                </div>
+                <button className='admin-btn' onClick={saveCostConfig} disabled={costLoad}>
+                  {costLoad ? t('costsSaving') : t('costsSave')}
+                </button>
+              </div>
+            </div>
+
             {/* Webhooks */}
             <div className='admin-step active' style={{ marginBottom: '1.5rem' }}>
               <div className='admin-step-title'>
@@ -5235,6 +5416,7 @@ export default function App() {
                       <option value='warning'>{t('webhookEventWarning')}</option>
                       <option value='critical,warning'>{t('webhookEventBoth')}</option>
                       <option value='cert_expiring_30,cert_expiring_15,cert_expiring_7,cert_expired'>{t('webhookEventCerts')}</option>
+                      <option value='restart_storm,oom_killed'>{t('webhookEventReliability')}</option>
                       <option value='*'>{t('webhookEventAll')}</option>
                     </select>
                   </div>

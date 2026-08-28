@@ -1225,6 +1225,111 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
+// ── Métricas Prometheus ────────────────────────────────────────────────────────
+// Exposição escrita à mão (sem client_golang) para não puxar dependência nova.
+// Estado em memória só; reinicia com o processo, como o resto dos contadores
+// ad-hoc já existentes no arquivo (rate limiter, blacklist de JWT etc.).
+
+var (
+	metricsMu               sync.Mutex
+	httpRequestsTotal       = map[string]int64{}       // "path|status" → contagem
+	webhookDeliveriesTotal  = map[string]int64{}       // "type|result" → contagem
+	lastSummaryMu           sync.RWMutex
+	lastSummary             = map[string]DashSummary{} // cluster → último resumo calculado
+	lastCertBucketsMu       sync.RWMutex
+	lastCertBuckets         = map[string]map[string]int{} // cluster → bucket → contagem
+)
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func withMetrics(path string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next(sw, r)
+		metricsMu.Lock()
+		httpRequestsTotal[path+"|"+strconv.Itoa(sw.status)]++
+		metricsMu.Unlock()
+	}
+}
+
+// register cadastra a rota já instrumentada — usar sempre isto em vez de
+// http.HandleFunc diretamente, para que /metrics veja todo endpoint da API.
+func register(path string, next http.HandlerFunc) {
+	http.HandleFunc(path, withMetrics(path, next))
+}
+
+func recordWebhookDelivery(whType, result string) {
+	metricsMu.Lock()
+	webhookDeliveriesTotal[whType+"|"+result]++
+	metricsMu.Unlock()
+}
+
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+	fmt.Fprintln(w, "# HELP pod_monitor_up 1 se o backend está no ar")
+	fmt.Fprintln(w, "# TYPE pod_monitor_up gauge")
+	fmt.Fprintln(w, "pod_monitor_up 1")
+
+	fmt.Fprintln(w, "# HELP pod_monitor_clusters_registered Número de clusters registrados")
+	fmt.Fprintln(w, "# TYPE pod_monitor_clusters_registered gauge")
+	fmt.Fprintf(w, "pod_monitor_clusters_registered %d\n", len(clusterNames()))
+
+	fmt.Fprintln(w, "# HELP pod_monitor_db_connected 1 se o PostgreSQL está conectado")
+	fmt.Fprintln(w, "# TYPE pod_monitor_db_connected gauge")
+	dbConnected := 0
+	if db != nil {
+		dbConnected = 1
+	}
+	fmt.Fprintf(w, "pod_monitor_db_connected %d\n", dbConnected)
+
+	lastSummaryMu.RLock()
+	fmt.Fprintln(w, "# HELP pod_monitor_alerts_critical Pods em alerta crítico no último resumo do dashboard")
+	fmt.Fprintln(w, "# TYPE pod_monitor_alerts_critical gauge")
+	for cluster, s := range lastSummary {
+		fmt.Fprintf(w, "pod_monitor_alerts_critical{cluster=%q} %d\n", cluster, s.Alerts.Critical)
+	}
+	fmt.Fprintln(w, "# HELP pod_monitor_alerts_warning Pods em alerta de aviso no último resumo do dashboard")
+	fmt.Fprintln(w, "# TYPE pod_monitor_alerts_warning gauge")
+	for cluster, s := range lastSummary {
+		fmt.Fprintf(w, "pod_monitor_alerts_warning{cluster=%q} %d\n", cluster, s.Alerts.Warning)
+	}
+	lastSummaryMu.RUnlock()
+
+	lastCertBucketsMu.RLock()
+	fmt.Fprintln(w, "# HELP pod_monitor_certificates Certificados TLS por cluster e faixa de expiração")
+	fmt.Fprintln(w, "# TYPE pod_monitor_certificates gauge")
+	for cluster, buckets := range lastCertBuckets {
+		for bucket, n := range buckets {
+			fmt.Fprintf(w, "pod_monitor_certificates{cluster=%q,bucket=%q} %d\n", cluster, bucket, n)
+		}
+	}
+	lastCertBucketsMu.RUnlock()
+
+	metricsMu.Lock()
+	fmt.Fprintln(w, "# HELP pod_monitor_http_requests_total Requisições HTTP atendidas por rota e status")
+	fmt.Fprintln(w, "# TYPE pod_monitor_http_requests_total counter")
+	for key, n := range httpRequestsTotal {
+		parts := strings.SplitN(key, "|", 2)
+		fmt.Fprintf(w, "pod_monitor_http_requests_total{path=%q,status=%q} %d\n", parts[0], parts[1], n)
+	}
+	fmt.Fprintln(w, "# HELP pod_monitor_webhook_deliveries_total Entregas de webhook por tipo e resultado")
+	fmt.Fprintln(w, "# TYPE pod_monitor_webhook_deliveries_total counter")
+	for key, n := range webhookDeliveriesTotal {
+		parts := strings.SplitN(key, "|", 2)
+		fmt.Fprintf(w, "pod_monitor_webhook_deliveries_total{type=%q,result=%q} %d\n", parts[0], parts[1], n)
+	}
+	metricsMu.Unlock()
+}
+
 // ── Middlewares ───────────────────────────────────────────────────────────────
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -2274,6 +2379,7 @@ func initDB() {
 	if connectDB(dsn) {
 		go cleanupLoop()
 		go certScanLoop()
+		go alertRulesLoop()
 		return
 	}
 	// Falha na subida (ex.: DNS do cluster ainda não pronto) não deve deixar o
@@ -2403,6 +2509,27 @@ func connectDB(dsn string) bool {
 			bucket      TEXT NOT NULL,
 			sent_at     TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 			UNIQUE(cluster, namespace, secret_name, bucket)
+		)`,
+		`CREATE TABLE IF NOT EXISTS cost_config (
+			id            BIGSERIAL PRIMARY KEY,
+			cluster       TEXT NOT NULL DEFAULT '',
+			currency      TEXT NOT NULL DEFAULT 'BRL',
+			cpu_core_hour DOUBLE PRECISION NOT NULL DEFAULT 0,
+			mem_gb_hour   DOUBLE PRECISION NOT NULL DEFAULT 0,
+			UNIQUE(cluster)
+		)`,
+		// Desativado por padrão: preço só faz sentido em cluster de nuvem com billing
+		// por hora — em minikube/on-prem/bare-metal não há custo real pra medir.
+		`ALTER TABLE cost_config ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 0`,
+		`CREATE TABLE IF NOT EXISTS alert_events_sent (
+			id        BIGSERIAL PRIMARY KEY,
+			cluster   TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			pod       TEXT NOT NULL,
+			container TEXT NOT NULL,
+			kind      TEXT NOT NULL,
+			sent_at   TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			UNIQUE(cluster, namespace, pod, container, kind)
 		)`,
 	}
 	for _, s := range stmts {
@@ -3151,6 +3278,13 @@ func scanCertsForAlerts() {
 			log.Printf("scan de certificados falhou no cluster %s: %v", name, err)
 			continue
 		}
+		buckets := map[string]int{}
+		for _, c := range certs {
+			buckets[c.Bucket]++
+		}
+		lastCertBucketsMu.Lock()
+		lastCertBuckets[name] = buckets
+		lastCertBucketsMu.Unlock()
 		for _, c := range certs {
 			if c.Bucket == "ok" {
 				db.Exec(`DELETE FROM cert_alerts_sent WHERE cluster=$1 AND namespace=$2 AND secret_name=$3`,
@@ -3182,6 +3316,116 @@ func certScanLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		scanCertsForAlerts()
+	}
+}
+
+// ── Alertas compostos ──────────────────────────────────────────────────────────
+// Vão além do limiar de %CPU/mem: detectam rajada de reinícios e OOMKilled,
+// reaproveitando o mesmo motor de dedupe/disparo dos alertas de certificado
+// (tabela alert_events_sent, mesmo idioma de cert_alerts_sent).
+//
+// Limitação conhecida: o baseline de reinícios (lastRestartCounts) é só em
+// memória — um redeploy do backend zera a contagem e pode perder uma rajada
+// bem na janela do restart. Aceitável para v1, mesmo espírito pragmático de
+// outras decisões já tomadas neste arquivo.
+
+var (
+	restartCountsMu   sync.Mutex
+	lastRestartCounts = map[string]int32{} // "cluster/ns/pod/container" → RestartCount visto no último tick
+)
+
+// fireOnce dispara o webhook só na primeira detecção (INSERT ON CONFLICT DO
+// NOTHING); repetições no mesmo estado não reenviam.
+func fireOnce(cluster, namespace, pod, container, kind string, payload interface{}) {
+	res, err := db.Exec(`INSERT INTO alert_events_sent (cluster, namespace, pod, container, kind) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+		cluster, namespace, pod, container, kind)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return
+	}
+	triggerWebhooks(kind, payload)
+}
+
+// clearIfSent remove o registro de dedupe quando a condição não se repete mais,
+// permitindo que uma recorrência futura dispare um novo alerta.
+func clearIfSent(cluster, namespace, pod, container, kind string) {
+	db.Exec(`DELETE FROM alert_events_sent WHERE cluster=$1 AND namespace=$2 AND pod=$3 AND container=$4 AND kind=$5`,
+		cluster, namespace, pod, container, kind)
+}
+
+func scanAlertRules() {
+	if db == nil {
+		return
+	}
+	threshold := 3
+	if v := os.Getenv("ALERT_RESTART_THRESHOLD"); v != "" {
+		fmt.Sscanf(v, "%d", &threshold)
+	}
+	ctx := context.Background()
+	for _, name := range clusterNames() {
+		clients, ok := clusters[name]
+		if !ok {
+			continue
+		}
+		list, err := clients.k8s.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			log.Printf("scan de alertas compostos falhou no cluster %s: %v", name, err)
+			continue
+		}
+		for _, pod := range list.Items {
+			for _, cs := range pod.Status.ContainerStatuses {
+				key := fmt.Sprintf("%s/%s/%s/%s", name, pod.Namespace, pod.Name, cs.Name)
+
+				restartCountsMu.Lock()
+				prev, seen := lastRestartCounts[key]
+				lastRestartCounts[key] = cs.RestartCount
+				restartCountsMu.Unlock()
+
+				payload := map[string]interface{}{
+					"cluster":   name,
+					"namespace": pod.Namespace,
+					"pod":       pod.Name,
+					"container": cs.Name,
+				}
+				// Na primeira vez que vemos este container só semeamos o baseline —
+				// sem isso, todo container já reiniciado alguma vez no passado (RestartCount
+				// cumulativo do k8s) dispararia "storm" no primeiro tick após todo restart
+				// do próprio backend, mesmo sem nenhum reinício novo de verdade.
+				if seen {
+					delta := cs.RestartCount - prev
+					if delta >= int32(threshold) {
+						payload["restarts_delta"] = delta
+						payload["restarts_total"] = cs.RestartCount
+						fireOnce(name, pod.Namespace, pod.Name, cs.Name, "restart_storm", payload)
+					} else {
+						clearIfSent(name, pod.Namespace, pod.Name, cs.Name, "restart_storm")
+					}
+				}
+
+				if cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.Reason == "OOMKilled" {
+					payload["reason"] = "OOMKilled"
+					fireOnce(name, pod.Namespace, pod.Name, cs.Name, "oom_killed", payload)
+				} else {
+					clearIfSent(name, pod.Namespace, pod.Name, cs.Name, "oom_killed")
+				}
+			}
+		}
+	}
+}
+
+func alertRulesLoop() {
+	interval := 5 * time.Minute
+	if v := os.Getenv("ALERT_RULES_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			interval = d
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		scanAlertRules()
 	}
 }
 
@@ -3748,6 +3992,10 @@ func handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
 	if summaryJSON, err2 := json.Marshal(summary); err2 == nil {
 		go ssePublish("summary", string(summaryJSON))
 	}
+
+	lastSummaryMu.Lock()
+	lastSummary[clusterName] = summary
+	lastSummaryMu.Unlock()
 
 	json.NewEncoder(w).Encode(summary)
 }
@@ -4756,13 +5004,16 @@ func sendHTTPOnce(url, contentType string, payload []byte) (int, error) {
 // Não retentar em: HTTP 4xx (erro do cliente — URL errada, auth inválida, etc.).
 var webhookBackoff = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
-func postWithRetry(url, contentType string, payload []byte) {
+func postWithRetry(whType, url, contentType string, payload []byte) {
 	for attempt, delay := range webhookBackoff {
 		code, err := sendHTTPOnce(url, contentType, payload)
 		if err == nil {
 			if code < 500 {
 				if code >= 400 {
 					log.Printf("webhook %s recusado (HTTP %d) — sem retry", url, code)
+					recordWebhookDelivery(whType, "error")
+				} else {
+					recordWebhookDelivery(whType, "ok")
 				}
 				return
 			}
@@ -4775,6 +5026,7 @@ func postWithRetry(url, contentType string, payload []byte) {
 		}
 	}
 	log.Printf("webhook %s abandonado após 3 tentativas", url)
+	recordWebhookDelivery(whType, "error")
 }
 
 func telegramRequest(cfg map[string]string, text string) (string, []byte, error) {
@@ -4866,30 +5118,50 @@ func dispatchEmailAsync(cfg map[string]string, subject, body string) {
 		time.Sleep(30 * time.Second)
 		if err2 := sendEmailOnce(cfg, subject, body); err2 != nil {
 			log.Printf("email abandonado após 2 tentativas: %v", err2)
+			recordWebhookDelivery("email", "error")
+			return
 		}
 	}
+	recordWebhookDelivery("email", "ok")
 }
 
 func humanizeEvent(eventName string, payloadObj interface{}) (subject, body string) {
-	data, _ := json.Marshal(payloadObj)
 	switch eventName {
 	case "critical":
-		return "Alerta crítico — Pod Monitor", fmt.Sprintf("Alerta crítico de uso de recursos.\n%s", data)
+		subject = "Alerta crítico — Pod Monitor"
 	case "warning":
-		return "Alerta de aviso — Pod Monitor", fmt.Sprintf("Alerta de aviso de uso de recursos.\n%s", data)
+		subject = "Alerta de aviso — Pod Monitor"
 	case "audit":
-		return "Evento de auditoria — Pod Monitor", string(data)
+		subject = "Evento de auditoria — Pod Monitor"
 	case "cert_expiring_30":
-		return "Certificado expira em 30 dias — Pod Monitor", fmt.Sprintf("Certificado próximo do vencimento.\n%s", data)
+		subject = "Certificado expira em 30 dias — Pod Monitor"
 	case "cert_expiring_15":
-		return "Certificado expira em 15 dias — Pod Monitor", fmt.Sprintf("Certificado próximo do vencimento.\n%s", data)
+		subject = "Certificado expira em 15 dias — Pod Monitor"
 	case "cert_expiring_7":
-		return "Certificado expira em 7 dias — Pod Monitor", fmt.Sprintf("Certificado prestes a vencer.\n%s", data)
+		subject = "Certificado expira em 7 dias — Pod Monitor"
 	case "cert_expired":
-		return "Certificado expirado — Pod Monitor", fmt.Sprintf("Certificado expirado.\n%s", data)
+		subject = "Certificado expirado — Pod Monitor"
+	case "restart_storm":
+		subject = "Rajada de reinícios — Pod Monitor"
+	case "oom_killed":
+		subject = "Container morto por falta de memória (OOMKilled) — Pod Monitor"
 	default:
-		return "Evento Pod Monitor: " + eventName, string(data)
+		subject = "Evento Pod Monitor: " + eventName
 	}
+	// Reaproveita a mesma extração de dados do card de e-mail (eventRows) para
+	// montar um corpo em texto plano — assim Telegram/Teams param de receber o
+	// JSON cru e mostram a mesma informação, só que sem formatação HTML.
+	_, _, intro, rows := eventRows(eventName, payloadObj)
+	var b strings.Builder
+	b.WriteString(intro)
+	for _, r := range rows {
+		if r[0] == "" {
+			b.WriteString("\n" + r[1])
+		} else {
+			b.WriteString(fmt.Sprintf("\n%s: %s", r[0], r[1]))
+		}
+	}
+	return subject, b.String()
 }
 
 // emailCardHTML monta o card HTML usado em todos os e-mails de alerta — layout
@@ -4936,19 +5208,21 @@ func certAlertColor(bucket string) string {
 	}
 }
 
-// humanizeEventHTML monta o corpo em HTML usado só no canal de e-mail —
-// Telegram/Teams continuam recebendo o texto plano de humanizeEvent.
-func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string {
+// eventRows extrai os mesmos dados estruturados (emoji, cor, texto de
+// introdução, linhas label/valor) usados tanto no card HTML de e-mail quanto
+// no corpo em texto plano de Telegram/Teams — uma única extração, duas
+// apresentações diferentes.
+func eventRows(eventName string, payloadObj interface{}) (emoji, colorHex, intro string, rows [][2]string) {
 	if c, ok := payloadObj.(CertInfo); ok {
 		notAfter := c.NotAfter
 		if t, err := time.Parse(time.RFC3339, c.NotAfter); err == nil {
 			notAfter = t.Local().Format("02/01/2006")
 		}
-		intro := "O certificado TLS abaixo precisa de atenção antes do vencimento."
+		intro = "O certificado TLS abaixo precisa de atenção antes do vencimento."
 		if c.Bucket == "expired" {
 			intro = "O certificado TLS abaixo já expirou e precisa ser renovado com urgência."
 		}
-		rows := [][2]string{
+		rows = [][2]string{
 			{"Cluster", c.Cluster},
 			{"Namespace", c.Namespace},
 			{"Secret", c.SecretName},
@@ -4956,7 +5230,7 @@ func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string
 			{"Emissor", c.Issuer},
 			{"Vencimento", fmt.Sprintf("%s (%d dias restantes)", notAfter, c.DaysLeft)},
 		}
-		return emailCardHTML(certAlertColor(c.Bucket), "🔒 "+subject, intro, rows)
+		return "🔒", certAlertColor(c.Bucket), intro, rows
 	}
 
 	data, _ := json.Marshal(payloadObj)
@@ -4975,11 +5249,11 @@ func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string
 			} `json:"pods"`
 		}
 		json.Unmarshal(data, &rap)
-		color, intro := "#d97706", "Foram detectados pods com uso de recursos em nível de aviso."
+		color, in := "#d97706", "Foram detectados pods com uso de recursos em nível de aviso."
 		if eventName == "critical" {
-			color, intro = "#dc2626", "Foram detectados pods com uso de recursos em nível crítico."
+			color, in = "#dc2626", "Foram detectados pods com uso de recursos em nível crítico."
 		}
-		rows := [][2]string{
+		rs := [][2]string{
 			{"Cluster", rap.Cluster},
 			{"Críticos", fmt.Sprintf("%d", rap.Critical)},
 			{"Avisos", fmt.Sprintf("%d", rap.Warning)},
@@ -4989,25 +5263,59 @@ func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string
 			max = 6
 		}
 		for _, pd := range rap.Pods[:max] {
-			rows = append(rows, [2]string{
+			rs = append(rs, [2]string{
 				pd.Namespace + " / " + pd.Pod,
 				fmt.Sprintf("%s — %s (%s)", pd.Container, pd.Reason, pd.Severity),
 			})
 		}
 		if len(rap.Pods) > max {
-			rows = append(rows, [2]string{"", fmt.Sprintf("+ %d outros pods", len(rap.Pods)-max)})
+			rs = append(rs, [2]string{"", fmt.Sprintf("+ %d outros pods", len(rap.Pods)-max)})
 		}
-		return emailCardHTML(color, "⚠ "+subject, intro, rows)
+		return "⚠", color, in, rs
 	case "audit":
 		var a struct{ Username, Role, Action, Detail, IP string }
 		json.Unmarshal(data, &a)
-		rows := [][2]string{
+		return "📋", "#2563eb", "Evento de auditoria registrado no Pod Monitor.", [][2]string{
 			{"Usuário", a.Username}, {"Papel", a.Role}, {"Ação", a.Action}, {"Detalhe", a.Detail}, {"IP", a.IP},
 		}
-		return emailCardHTML("#2563eb", "📋 "+subject, "Evento de auditoria registrado no Pod Monitor.", rows)
+	case "restart_storm", "oom_killed":
+		var ap struct {
+			Cluster       string `json:"cluster"`
+			Namespace     string `json:"namespace"`
+			Pod           string `json:"pod"`
+			Container     string `json:"container"`
+			RestartsDelta int32  `json:"restarts_delta"`
+			RestartsTotal int32  `json:"restarts_total"`
+			Reason        string `json:"reason"`
+		}
+		json.Unmarshal(data, &ap)
+		rs := [][2]string{
+			{"Cluster", ap.Cluster},
+			{"Namespace", ap.Namespace},
+			{"Pod", ap.Pod},
+			{"Container", ap.Container},
+		}
+		in := "Container reiniciando repetidamente — possível crash loop."
+		if eventName == "restart_storm" {
+			rs = append(rs, [2]string{"Reinícios", fmt.Sprintf("+%d nesta janela (%d no total)", ap.RestartsDelta, ap.RestartsTotal)})
+		} else {
+			in = "Container encerrado por falta de memória (OOMKilled)."
+			rs = append(rs, [2]string{"Motivo", ap.Reason})
+		}
+		return "🔁", "#dc2626", in, rs
 	default:
-		return emailCardHTML("#6b7280", subject, "Evento do Pod Monitor.", [][2]string{{"Dados", string(data)}})
+		return "", "#6b7280", "Evento do Pod Monitor.", [][2]string{{"Dados", string(data)}}
 	}
+}
+
+// humanizeEventHTML monta o card HTML usado no canal de e-mail.
+func humanizeEventHTML(eventName, subject string, payloadObj interface{}) string {
+	emoji, color, intro, rows := eventRows(eventName, payloadObj)
+	title := subject
+	if emoji != "" {
+		title = emoji + " " + subject
+	}
+	return emailCardHTML(color, title, intro, rows)
 }
 
 func triggerWebhooks(eventName string, payloadObj interface{}) {
@@ -5042,18 +5350,21 @@ func triggerWebhooks(eventName string, payloadObj interface{}) {
 		switch wr.typ {
 		case "telegram":
 			cfg := normalizeWHConfig(json.RawMessage(wr.cfg))
-			if url, tgPayload, err := telegramRequest(cfg, body); err == nil {
-				go postWithRetry(url, "application/json", tgPayload)
+			// Telegram não tem campo de título separado como o Teams/e-mail —
+			// o assunto vai como primeira linha da própria mensagem.
+			if url, tgPayload, err := telegramRequest(cfg, subject+"\n\n"+body); err == nil {
+				go postWithRetry("telegram", url, "application/json", tgPayload)
 			} else {
 				log.Printf("webhook telegram ignorado: %v", err)
+				recordWebhookDelivery("telegram", "error")
 			}
 		case "teams":
-			go postWithRetry(wr.url, "application/json", teamsPayload(subject, body))
+			go postWithRetry("teams", wr.url, "application/json", teamsPayload(subject, body))
 		case "email":
 			cfg := normalizeWHConfig(json.RawMessage(wr.cfg))
 			go dispatchEmailAsync(cfg, subject, humanizeEventHTML(eventName, subject, payloadObj))
 		default:
-			go postWithRetry(wr.url, "application/json", payload)
+			go postWithRetry("generic", wr.url, "application/json", payload)
 		}
 	}
 }
@@ -5144,6 +5455,158 @@ func handleDeleteThreshold(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value(claimsCtxKey).(*TokenClaims)
 	auditLog(claims.Username, claims.Role, "threshold_delete", "id="+id, r.RemoteAddr)
 	w.WriteHeader(204)
+}
+
+// ── Custos (FinOps) ────────────────────────────────────────────────────────────
+// Estimativa simples: soma os requests de CPU/memória por namespace (o que de
+// fato reserva capacidade do cluster, não o uso instantâneo) e aplica o preço
+// por vCPU-hora / GB-hora configurado pelo admin. Sem integração com billing de
+// nuvem — é um "Kubecost lite" propositalmente simples.
+
+type NamespaceCost struct {
+	Namespace string  `json:"namespace"`
+	CPUCores  float64 `json:"cpu_cores"`
+	MemGiB    float64 `json:"mem_gib"`
+	CostHour  float64 `json:"cost_hour"`
+	CostMonth float64 `json:"cost_month"`
+}
+
+type CostConfig struct {
+	Cluster     string  `json:"cluster"`
+	Enabled     bool    `json:"enabled"`
+	Currency    string  `json:"currency"`
+	CPUCoreHour float64 `json:"cpu_core_hour"`
+	MemGBHour   float64 `json:"mem_gb_hour"`
+}
+
+// getCostConfig tenta a config específica do cluster, depois o default global
+// (cluster=''); sem nenhuma linha configurada, devolve desativado (Enabled=false).
+// A estimativa só faz sentido em cluster de nuvem com billing por hora — por
+// isso o padrão é sempre desligado, mesmo com preço cadastrado.
+func getCostConfig(cluster string) CostConfig {
+	cfg := CostConfig{Cluster: cluster, Currency: "BRL"}
+	if db == nil {
+		return cfg
+	}
+	for _, c := range []string{cluster, ""} {
+		var currency string
+		var enabled int
+		var cpuHour, memHour float64
+		err := db.QueryRow(`SELECT currency, enabled, cpu_core_hour, mem_gb_hour FROM cost_config WHERE cluster=$1`, c).
+			Scan(&currency, &enabled, &cpuHour, &memHour)
+		if err == nil {
+			cfg.Currency, cfg.Enabled, cfg.CPUCoreHour, cfg.MemGBHour = currency, enabled == 1, cpuHour, memHour
+			return cfg
+		}
+	}
+	return cfg
+}
+
+// handleCosts agrupa os requests de CPU/memória por namespace e aplica o preço
+// configurado. "configured=false" quando nenhum preço foi definido ainda, para
+// o frontend mostrar um aviso em vez de custo zero enganoso.
+func handleCosts(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsCtxKey).(*TokenClaims)
+	clients, clusterName, err := getCluster(r)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if claims != nil && !devAllowedCluster(claims, clusterName) {
+		http.Error(w, "Forbidden", 403)
+		return
+	}
+	cfg := getCostConfig(clusterName)
+	if !cfg.Enabled {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"enabled":    false,
+			"configured": false,
+			"currency":   cfg.Currency,
+			"items":      []NamespaceCost{},
+		})
+		return
+	}
+	ns := r.URL.Query().Get("namespace")
+	pods, err := getPodsResources(clients, ns)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	cores := map[string]float64{}
+	gib := map[string]float64{}
+	for _, p := range pods {
+		for _, c := range p.Containers {
+			cores[p.Namespace] += parseCPUm(c.CPURequest) / 1000
+			gib[p.Namespace] += parseMemMi(c.MemoryRequest) / 1024
+		}
+	}
+	items := make([]NamespaceCost, 0, len(cores))
+	for namespace, cpu := range cores {
+		mem := gib[namespace]
+		costHour := cpu*cfg.CPUCoreHour + mem*cfg.MemGBHour
+		items = append(items, NamespaceCost{
+			Namespace: namespace,
+			CPUCores:  cpu,
+			MemGiB:    mem,
+			CostHour:  costHour,
+			CostMonth: costHour * 730,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CostMonth > items[j].CostMonth })
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":    true,
+		"configured": cfg.CPUCoreHour > 0 || cfg.MemGBHour > 0,
+		"currency":   cfg.Currency,
+		"items":      items,
+	})
+}
+
+func handleCostConfigRouter(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cluster := r.URL.Query().Get("cluster")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(getCostConfig(cluster))
+	case http.MethodPost:
+		if db == nil {
+			http.Error(w, "banco não configurado", 400)
+			return
+		}
+		var cfg CostConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, "payload inválido", 400)
+			return
+		}
+		if cfg.Currency == "" {
+			cfg.Currency = "BRL"
+		}
+		if cfg.CPUCoreHour < 0 || cfg.MemGBHour < 0 {
+			http.Error(w, "preços não podem ser negativos", 400)
+			return
+		}
+		enabled := 0
+		if cfg.Enabled {
+			enabled = 1
+		}
+		_, err := db.Exec(`INSERT INTO cost_config (cluster, currency, enabled, cpu_core_hour, mem_gb_hour)
+			VALUES ($1,$2,$3,$4,$5) ON CONFLICT(cluster) DO UPDATE SET currency=EXCLUDED.currency,
+			enabled=EXCLUDED.enabled, cpu_core_hour=EXCLUDED.cpu_core_hour, mem_gb_hour=EXCLUDED.mem_gb_hour`,
+			cfg.Cluster, cfg.Currency, enabled, cfg.CPUCoreHour, cfg.MemGBHour)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		claims := r.Context().Value(claimsCtxKey).(*TokenClaims)
+		auditLog(claims.Username, claims.Role, "cost_config_save",
+			fmt.Sprintf("cluster=%s enabled=%v currency=%s cpu=%.4f mem=%.4f", cfg.Cluster, cfg.Enabled, cfg.Currency, cfg.CPUCoreHour, cfg.MemGBHour),
+			r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cfg)
+	default:
+		http.Error(w, "Method Not Allowed", 405)
+	}
 }
 
 // ── Topology ──────────────────────────────────────────────────────────────────
@@ -5699,7 +6162,7 @@ func handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 	case "telegram":
 		var url string
 		var payload []byte
-		if url, payload, err = telegramRequest(cfg, body); err == nil {
+		if url, payload, err = telegramRequest(cfg, subject+"\n\n"+body); err == nil {
 			status, err = sendHTTPOnce(url, "application/json", payload)
 		}
 	case "teams":
@@ -5830,73 +6293,76 @@ func main() {
 	}()
 
 	// Públicos
-	http.HandleFunc("/api/auth/login",          corsMiddleware(handleLogin))
-	http.HandleFunc("/api/auth/logout",         authMiddleware(handleLogout))
-	http.HandleFunc("/api/auth/mfa/validate",       corsMiddleware(handleMFAValidate))
-	http.HandleFunc("/api/auth/mfa/setup",          corsMiddleware(handleMFASetupInfo))
-	http.HandleFunc("/api/auth/mfa/setup/confirm",  corsMiddleware(handleMFASetupConfirm))
-	http.HandleFunc("/api/auth/mfa/reset-user",     adminOnly(handleMFAResetUser))
+	register("/api/auth/login",          corsMiddleware(handleLogin))
+	register("/api/auth/logout",         authMiddleware(handleLogout))
+	register("/api/auth/mfa/validate",       corsMiddleware(handleMFAValidate))
+	register("/api/auth/mfa/setup",          corsMiddleware(handleMFASetupInfo))
+	register("/api/auth/mfa/setup/confirm",  corsMiddleware(handleMFASetupConfirm))
+	register("/api/auth/mfa/reset-user",     adminOnly(handleMFAResetUser))
 
 	// Dev + admin/reader (devs veem apenas clusters/namespaces/logs permitidos)
-	http.HandleFunc("/api/clusters",   authMiddleware(handleClusters))
-	http.HandleFunc("/api/namespaces", authMiddleware(handleNamespaces))
-	http.HandleFunc("/api/logs",       devOrAdminOnly(handleLogs))
+	register("/api/clusters",   authMiddleware(handleClusters))
+	register("/api/namespaces", authMiddleware(handleNamespaces))
+	register("/api/logs",       devOrAdminOnly(handleLogs))
 
 	// Recursos: dev pode chamar (só para listar pods no contexto de logs)
-	http.HandleFunc("/api/resources",  authMiddleware(handleResources))
-	http.HandleFunc("/api/nodes",      readerOrAdminOnly(handleNodes))
-	http.HandleFunc("/api/storage",    readerOrAdminOnly(handleStorage))
-	http.HandleFunc("/api/certificates", readerOrAdminOnly(handleCertificates))
-	http.HandleFunc("/api/orphans",    readerOrAdminOnly(handleOrphans))
-	http.HandleFunc("/api/history",     readerOrAdminOnly(handleHistory))
-	http.HandleFunc("/api/history/csv", readerOrAdminOnly(handleHistoryCSV))
-	http.HandleFunc("/api/docker/hosts",      readerOrAdminOnly(handleDockerHosts))
-	http.HandleFunc("/api/docker/containers", readerOrAdminOnly(handleDockerContainers))
-	http.HandleFunc("/api/containers",        readerOrAdminOnly(handleContainers))
-	http.HandleFunc("/api/helm/releases",     readerOrAdminOnly(handleHelmReleases))
-	http.HandleFunc("/api/deployments",       readerOrAdminOnly(handleDeployments))
-	http.HandleFunc("/api/analysis",          readerOrAdminOnly(handleAnalysis))
-	http.HandleFunc("/api/dashboard/summary",    authMiddleware(handleDashboardSummary))
-	http.HandleFunc("/api/dashboard/timeseries", authMiddleware(handleDashTimeseries))
-	http.HandleFunc("/api/dashboards",           authMiddleware(handleGetDashboards))
-	http.HandleFunc("/api/dashboards/save",    authMiddleware(handleSaveDashboard))
-	http.HandleFunc("/api/dashboards/delete",  authMiddleware(handleDeleteDashboard))
+	register("/api/resources",  authMiddleware(handleResources))
+	register("/api/nodes",      readerOrAdminOnly(handleNodes))
+	register("/api/storage",    readerOrAdminOnly(handleStorage))
+	register("/api/certificates", readerOrAdminOnly(handleCertificates))
+	register("/api/orphans",    readerOrAdminOnly(handleOrphans))
+	register("/api/history",     readerOrAdminOnly(handleHistory))
+	register("/api/history/csv", readerOrAdminOnly(handleHistoryCSV))
+	register("/api/docker/hosts",      readerOrAdminOnly(handleDockerHosts))
+	register("/api/docker/containers", readerOrAdminOnly(handleDockerContainers))
+	register("/api/containers",        readerOrAdminOnly(handleContainers))
+	register("/api/helm/releases",     readerOrAdminOnly(handleHelmReleases))
+	register("/api/deployments",       readerOrAdminOnly(handleDeployments))
+	register("/api/analysis",          readerOrAdminOnly(handleAnalysis))
+	register("/api/dashboard/summary",    authMiddleware(handleDashboardSummary))
+	register("/api/dashboard/timeseries", authMiddleware(handleDashTimeseries))
+	register("/api/dashboards",           authMiddleware(handleGetDashboards))
+	register("/api/dashboards/save",    authMiddleware(handleSaveDashboard))
+	register("/api/dashboards/delete",  authMiddleware(handleDeleteDashboard))
 
 	// Somente administration
-	http.HandleFunc("/api/auth/users",            adminOnly(handleGetUsers))
-	http.HandleFunc("/api/auth/users/create",     adminOnly(handleCreateUser))
-	http.HandleFunc("/api/auth/users/delete",     adminOnly(handleDeleteUser))
-	http.HandleFunc("/api/auth/users/password",    adminOnly(handleChangePassword))
-	http.HandleFunc("/api/auth/users/role",        adminOnly(handleUpdateUserRole))
-	http.HandleFunc("/api/auth/users/dev-access", adminOnly(handleUpdateDevAccess))
-	http.HandleFunc("/api/auth/mfa/toggle",       adminOnly(handleAdminToggleMFA))
-	http.HandleFunc("/api/auth/groups",           adminOnly(handleGetGroups))
-	http.HandleFunc("/api/auth/groups/create",    adminOnly(handleCreateGroup))
-	http.HandleFunc("/api/auth/groups/delete",    adminOnly(handleDeleteGroup))
-	http.HandleFunc("/api/auth/groups/access",    adminOnly(handleGroupAccess))
-	http.HandleFunc("/api/auth/groups/mfa",       adminOnly(handleGroupMFA))
-	http.HandleFunc("/api/auth/groups/members",   adminOnly(handleGroupMembers))
-	http.HandleFunc("/api/admin/validate",     adminOnly(handleAdminValidate))
-	http.HandleFunc("/api/admin/create-sa",   adminOnly(handleAdminCreateSA))
-	http.HandleFunc("/api/admin/apply",       adminOnly(handleAdminApply))
-	http.HandleFunc("/api/admin/docker-host",    adminOnly(handleAdminDockerHost))
-	http.HandleFunc("/api/admin/cluster/delete", adminOnly(handleAdminDeleteCluster))
+	register("/api/auth/users",            adminOnly(handleGetUsers))
+	register("/api/auth/users/create",     adminOnly(handleCreateUser))
+	register("/api/auth/users/delete",     adminOnly(handleDeleteUser))
+	register("/api/auth/users/password",    adminOnly(handleChangePassword))
+	register("/api/auth/users/role",        adminOnly(handleUpdateUserRole))
+	register("/api/auth/users/dev-access", adminOnly(handleUpdateDevAccess))
+	register("/api/auth/mfa/toggle",       adminOnly(handleAdminToggleMFA))
+	register("/api/auth/groups",           adminOnly(handleGetGroups))
+	register("/api/auth/groups/create",    adminOnly(handleCreateGroup))
+	register("/api/auth/groups/delete",    adminOnly(handleDeleteGroup))
+	register("/api/auth/groups/access",    adminOnly(handleGroupAccess))
+	register("/api/auth/groups/mfa",       adminOnly(handleGroupMFA))
+	register("/api/auth/groups/members",   adminOnly(handleGroupMembers))
+	register("/api/admin/validate",     adminOnly(handleAdminValidate))
+	register("/api/admin/create-sa",   adminOnly(handleAdminCreateSA))
+	register("/api/admin/apply",       adminOnly(handleAdminApply))
+	register("/api/admin/docker-host",    adminOnly(handleAdminDockerHost))
+	register("/api/admin/cluster/delete", adminOnly(handleAdminDeleteCluster))
 
 	// Novos endpoints
-	http.HandleFunc("/api/topology",          readerOrAdminOnly(handleTopology))
-	http.HandleFunc("/api/quotas",            readerOrAdminOnly(handleQuotas))
-	http.HandleFunc("/api/audit",             adminOnly(handleAuditLog))
-	http.HandleFunc("/api/thresholds",        adminOnly(handleThresholdsRouter))
-	http.HandleFunc("/api/webhooks",          adminOnly(handleWebhooksRouter))
-	http.HandleFunc("/api/webhooks/test",     adminOnly(handleWebhookTest))
-	http.HandleFunc("/api/sse/events",        authMiddleware(handleSSE))
+	register("/api/topology",          readerOrAdminOnly(handleTopology))
+	register("/api/quotas",            readerOrAdminOnly(handleQuotas))
+	register("/api/audit",             adminOnly(handleAuditLog))
+	register("/api/thresholds",        adminOnly(handleThresholdsRouter))
+	register("/api/costs",              readerOrAdminOnly(handleCosts))
+	register("/api/admin/cost-config",  adminOnly(handleCostConfigRouter))
+	register("/api/webhooks",          adminOnly(handleWebhooksRouter))
+	register("/api/webhooks/test",     adminOnly(handleWebhookTest))
+	register("/api/sse/events",        authMiddleware(handleSSE))
 
-	http.HandleFunc("/healthz",      handleHealthz)
-	http.HandleFunc("/openapi.yaml", handleOpenAPISpec)
-	http.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+	register("/healthz",      handleHealthz)
+	register("/openapi.yaml", handleOpenAPISpec)
+	register("/docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, swaggerUIHTML)
 	})
+	http.HandleFunc("/metrics", handleMetrics) // sem autenticação — convenção de scraping
 	fmt.Println("Backend rodando na porta 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
