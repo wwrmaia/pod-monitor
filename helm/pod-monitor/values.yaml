@@ -33,6 +33,15 @@ backend:
   # expiration alerts (e.g. "15m", "1h"). Leave empty for the 1h default.
   certScanInterval: ""
 
+  # ALERT_RULES_INTERVAL controls how often the composite alert loop
+  # (restart storms, OOMKilled) re-scans pods (e.g. "1m", "5m"). Leave empty
+  # for the 5m default.
+  alertRulesInterval: ""
+
+  # ALERT_RESTART_THRESHOLD is how many restarts within one interval count
+  # as a "restart storm". Leave empty for the default of 3.
+  alertRestartThreshold: ""
+
   # Docker/Podman external host monitoring (optional)
   # Enable to monitor containers running outside the Kubernetes cluster.
   docker:

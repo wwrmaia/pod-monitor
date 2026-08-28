@@ -20,14 +20,18 @@
 16. [Cotas de Recursos (Quotas)](#16-cotas-de-recursos-quotas)
 17. [Webhooks de Alertas](#17-webhooks-de-alertas)
 18. [Thresholds de Alerta Configuráveis](#18-thresholds-de-alerta-configuráveis)
-19. [Log de Auditoria](#19-log-de-auditoria)
-20. [Atualizações em Tempo Real (SSE)](#20-atualizações-em-tempo-real-sse)
-21. [Aviso de Expiração de Sessão](#21-aviso-de-expiração-de-sessão)
-22. [Modo NOC — Rotação Automática](#22-modo-noc--rotação-automática)
-23. [Segurança](#23-segurança)
-24. [Paginação de APIs](#24-paginação-de-apis)
-25. [Documentação OpenAPI / Swagger UI](#25-documentação-openapi--swagger-ui)
-26. [Changelog](#26-changelog)
+19. [Monitoramento de Certificados TLS](#19-monitoramento-de-certificados-tls)
+20. [Log de Auditoria](#20-log-de-auditoria)
+21. [Atualizações em Tempo Real (SSE)](#21-atualizações-em-tempo-real-sse)
+22. [Aviso de Expiração de Sessão](#22-aviso-de-expiração-de-sessão)
+23. [Modo NOC — Rotação Automática](#23-modo-noc--rotação-automática)
+24. [Segurança](#24-segurança)
+25. [Paginação de APIs](#25-paginação-de-apis)
+26. [Documentação OpenAPI / Swagger UI](#26-documentação-openapi--swagger-ui)
+27. [Changelog](#27-changelog)
+28. [Métricas Prometheus](#28-métricas-prometheus)
+29. [Custo por Namespace (FinOps)](#29-custo-por-namespace-finops)
+30. [Alertas Compostos (Confiabilidade)](#30-alertas-compostos-confiabilidade)
 
 ---
 
@@ -441,6 +445,15 @@ Criados automaticamente se não existirem no banco:
 | DELETE | `/api/webhooks?id=N` | Remove um webhook |
 | POST | `/api/webhooks/test` | Envia payload de teste para uma URL webhook |
 | GET | `/api/audit?limit=N` | Lista entradas do log de auditoria |
+| GET | `/api/admin/cost-config?cluster=X` | Lê o preço/toggle de custo configurado (seção 29) |
+| POST | `/api/admin/cost-config` | Define preço/toggle de custo para um cluster |
+
+### Custo e observabilidade (readerOrAdmin / público)
+
+| Método | Endpoint | Auth | Descrição |
+|--------|----------|------|-----------|
+| GET | `/api/costs?cluster=X&namespace=Y` | readerOrAdmin | Estimativa de custo por namespace (seção 29) |
+| GET | `/metrics` | — (sem auth) | Métricas Prometheus (seção 28) |
 
 ### Monitoramento Docker/Podman (readerOrAdmin)
 
@@ -2266,6 +2279,23 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 27. Changelog
 
+### v0.8.0 — 2026-08-28
+
+#### Novas funcionalidades
+- **Métricas Prometheus** — novo endpoint `GET /metrics` (sem autenticação, convenção padrão de scraping), formato de exposição escrito à mão (sem dependência de `client_golang`). Expõe estado do backend, alertas por cluster, certificados por bucket, e contadores de requisições HTTP e entregas de webhook — ver [seção 28](#28-métricas-prometheus).
+- **Custo estimado por namespace (FinOps)** — nova aba "Custos" + seção correspondente no Admin. Estima custo a partir dos requests de CPU/memória × preço configurável por vCPU-hora/GB-hora. **Desativado por padrão por cluster** (`enabled=false`) — preço só faz sentido em cluster de nuvem com billing por hora (EKS/GKE/AKS/ROSA/ARO), não em cluster local/on-prem/bare-metal — ver [seção 29](#29-custo-por-namespace-finops).
+- **Alertas compostos** — além do limiar de %CPU/memória, o backend agora detecta rajada de reinícios (`restart_storm`) e containers mortos por falta de memória (`oom_killed`), reaproveitando o mesmo motor de dedupe/disparo dos alertas de certificado — ver [seção 30](#30-alertas-compostos-confiabilidade).
+- **Mensagens de Telegram/Teams humanizadas** — antes só o e-mail tinha um corpo formatado (cartão HTML); Telegram e Teams recebiam o payload JSON cru. Agora os três canais usam a mesma extração de dados (`eventRows`), cada um com sua própria apresentação (texto plano pra Telegram/Teams, cartão HTML pro e-mail).
+
+#### Correções
+- **Rajada de reinícios disparava para todo o cluster no primeiro tick pós-restart do backend** — o baseline de contagem de reinícios é só em memória; a primeira leitura de cada container tratava a contagem cumulativa (`RestartCount`, que nunca zera desde que o pod nasceu) inteira como se fosse um evento novo, disparando `restart_storm` pra qualquer container com qualquer histórico de reinício. Corrigido: a primeira observação de cada container só semeia o baseline, sem disparar.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.8.0`, `wwrmaia/pod-monitor-frontend:0.8.0`
+- Helm chart: `version: 0.8.0`, `appVersion: "0.8.0"`
+- Novos valores Helm: `backend.alertRulesInterval`, `backend.alertRestartThreshold`
+- Nenhuma mudança de RBAC necessária — o loop de alertas compostos usa a mesma permissão de leitura de pods já concedida.
+
 ### v0.7.0 — 2026-08-27
 
 #### Novas funcionalidades
@@ -2351,6 +2381,124 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 - NetworkPolicy Kubernetes
 - Docker socket proxy sidecar (nunca monta docker.sock no container principal)
 - Aviso de senha padrão no startup
+
+---
+
+## 28. Métricas Prometheus
+
+*Adicionado na v0.8.0.*
+
+### Endpoint
+
+```
+GET /metrics   (sem autenticação — convenção padrão de scraping do Prometheus)
+```
+
+Texto no formato de exposição do Prometheus, escrito à mão (sem a dependência `client_golang`, de propósito, pra não adicionar peso ao binário). Métricas expostas:
+
+| Métrica | Tipo | Descrição |
+|---------|------|-----------|
+| `pod_monitor_up` | gauge | Sempre `1` enquanto o backend está no ar |
+| `pod_monitor_clusters_registered` | gauge | Número de clusters registrados |
+| `pod_monitor_db_connected` | gauge | `1` se o PostgreSQL está conectado |
+| `pod_monitor_alerts_critical{cluster}` / `_warning{cluster}` | gauge | Do último `/api/dashboard/summary` calculado por cluster (cache em memória) |
+| `pod_monitor_certificates{cluster,bucket}` | gauge | Contagem de certificados por bucket, do último scan periódico |
+| `pod_monitor_http_requests_total{path,status}` | counter | Requisições atendidas, via o wrapper `withMetrics`/`register()` que envolve toda rota registrada em `main()` |
+| `pod_monitor_webhook_deliveries_total{type,result}` | counter | Entregas de webhook (`result`: `ok`/`error`) |
+
+### Limitações conhecidas
+
+- Todo estado é em memória — reinicia zerado a cada restart do pod (mesmo espírito de outros contadores ad-hoc já existentes no arquivo, como o rate limiter de login).
+- Os gauges de alertas/certificados só refletem o último cálculo feito por uma chamada real à API (`/api/dashboard/summary` / scan de certificado) — não há um loop dedicado só pra manter esses gauges atualizados independente de uso.
+
+### Integrar com um Prometheus existente
+
+A NetworkPolicy padrão (`k8s/network-policy.yaml`) só libera tráfego de `frontend` e `ingress-nginx` pro backend — um Prometheus rodando em outro namespace precisa de uma regra adicional (bloco comentado já incluído no arquivo, pronto pra descomentar apontando pro namespace `monitoring`).
+
+---
+
+## 29. Custo por Namespace (FinOps)
+
+*Adicionado na v0.8.0.*
+
+### Como funciona
+
+O backend agrupa os *requests* de CPU/memória (não o uso real) de todos os containers por namespace — o mesmo dado já coletado por `/api/resources` — e aplica um preço configurável: `custo/hora = cores × preço_vCPU_hora + GiB × preço_GB_hora`; `custo/mês = custo/hora × 730`.
+
+### Desativado por padrão, por decisão de produto
+
+Preço só faz sentido em cluster de nuvem com billing por hora (EKS/GKE/AKS/ROSA/ARO) — em cluster local, on-prem ou bare-metal não existe custo real por hora pra medir. Por isso cada cluster tem seu próprio toggle `enabled` (tabela `cost_config`, coluna `enabled`, **default `false`**), e a estimativa só roda depois que um admin ativa explicitamente aquele cluster.
+
+### Endpoints
+
+```
+GET /api/costs?cluster=X&namespace=Y   (namespace opcional; reader ou admin)
+
+→ {
+    "enabled": true,
+    "configured": true,
+    "currency": "BRL",
+    "items": [
+      { "namespace": "producao", "cpu_cores": 4.2, "mem_gib": 8.5,
+        "cost_hour": 3.10, "cost_month": 2263.00 }
+    ]
+  }
+
+GET/POST /api/admin/cost-config?cluster=X   (admin)
+→ { "cluster": "X", "enabled": true, "currency": "BRL",
+    "cpu_core_hour": 0.05, "mem_gb_hour": 0.01 }
+```
+
+Quando `enabled=false`, o endpoint responde direto sem sequer coletar os pods do cluster — evita trabalho desnecessário em clusters onde o admin não quer a estimativa.
+
+### Config por cluster com fallback
+
+`getCostConfig(cluster)` tenta a linha específica do cluster, e cai pro default global (`cluster=''`) se não houver uma — mesmo padrão já usado por `getThreshold`.
+
+### Aba Custos (frontend) e seção no Admin
+
+Aba independente (mesmo padrão de módulo de `AnalysisTab`), com seletor de cluster próprio. Mostra uma mensagem diferente pra cada estado: desativado (`enabled=false`) vs. ativado mas sem preço configurado (`configured=false`) vs. com dados. No Admin, os campos de moeda/preço ficam desabilitados visualmente até o checkbox "Ativar estimativa de custos" ser marcado.
+
+---
+
+## 30. Alertas Compostos (Confiabilidade)
+
+*Adicionado na v0.8.0.*
+
+### Como funciona
+
+Além do limiar de %CPU/memória (seção 18), um loop em background (`alertRulesLoop`, padrão a cada **5 minutos**, configurável via `ALERT_RULES_INTERVAL`) varre todos os clusters registrados e avalia, por container:
+
+- **`restart_storm`** — se o `RestartCount` (cumulativo desde que o pod nasceu) subiu `ALERT_RESTART_THRESHOLD` (padrão **3**) ou mais desde a última leitura. A primeira vez que um container é observado só semeia o baseline em memória, sem disparar — evita que containers com histórico de reinício antigo (de antes do backend subir) disparem alerta falso logo no primeiro tick.
+- **`oom_killed`** — se o último encerramento do container teve motivo `OOMKilled`.
+
+Os dois deduplicam pela tabela `alert_events_sent` (mesmo padrão de `cert_alerts_sent`, seção 19): dispara uma vez, não repete enquanto a condição persistir, e libera pra disparar de novo se a condição se repetir no futuro (o registro é removido quando a condição deixa de ser observada).
+
+### Payload do evento
+
+```json
+{
+  "cluster": "producao",
+  "namespace": "checkout",
+  "pod": "api-7d9f8",
+  "container": "api",
+  "restarts_delta": 5,
+  "restarts_total": 12
+}
+```
+(`oom_killed` traz `reason: "OOMKilled"` no lugar de `restarts_delta`/`restarts_total`.)
+
+### Eventos disparados
+
+Usar em Admin → Webhooks → Eventos: `restart_storm`, `oom_killed` (agrupados na opção "Confiabilidade"), ou `*` pra todos.
+
+### Limitação conhecida
+
+O baseline de reinícios é só em memória — um redeploy do backend zera a contagem, podendo perder uma rajada bem na janela do restart. Aceitável na v1, mesmo espírito pragmático de outras decisões já tomadas no projeto.
+
+### RBAC necessário
+
+Nenhuma mudança — usa a mesma permissão de `get`/`list` em `pods` já concedida à ClusterRole do backend.
 
 ---
 

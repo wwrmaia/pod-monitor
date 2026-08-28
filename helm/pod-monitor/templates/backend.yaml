@@ -61,6 +61,14 @@ spec:
             - name: CERT_SCAN_INTERVAL
               value: {{ .Values.backend.certScanInterval | quote }}
             {{- end }}
+            {{- if .Values.backend.alertRulesInterval }}
+            - name: ALERT_RULES_INTERVAL
+              value: {{ .Values.backend.alertRulesInterval | quote }}
+            {{- end }}
+            {{- if .Values.backend.alertRestartThreshold }}
+            - name: ALERT_RESTART_THRESHOLD
+              value: {{ .Values.backend.alertRestartThreshold | quote }}
+            {{- end }}
             {{- if .Values.backend.docker.enabled }}
             - name: DOCKER_HOSTS
               value: {{ .Values.backend.docker.hosts | quote }}
