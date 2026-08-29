@@ -10,6 +10,9 @@ já existente, focado em leitura. Uma TUI interativa (navegação ao vivo, estil
 `internal/config`, que já estão isolados da camada de apresentação (`cmd/`)
 justamente pra serem reaproveitados sem mudança quando essa TUI vier.
 
+Pra instalar binários pré-compilados (Linux/macOS/Windows) sem precisar do Go,
+ver [`INSTALL.md`](./INSTALL.md).
+
 ## Build
 
 ```bash
