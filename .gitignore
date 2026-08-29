@@ -1,6 +1,7 @@
 # Go binaries
 backend/api
 backend/backend
+cli/podmon
 
 # Go build cache
 backend/*.test

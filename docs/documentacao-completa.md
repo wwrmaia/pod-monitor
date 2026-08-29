@@ -32,6 +32,7 @@
 28. [Métricas Prometheus](#28-métricas-prometheus)
 29. [Custo por Namespace (FinOps)](#29-custo-por-namespace-finops)
 30. [Alertas Compostos (Confiabilidade)](#30-alertas-compostos-confiabilidade)
+31. [CLI (podmon)](#31-cli-podmon)
 
 ---
 
@@ -2285,6 +2286,19 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 27. Changelog
 
+### v0.9.1 — 2026-08-28
+
+#### Novas funcionalidades
+- **CLI (`podmon`), nível 1 do roadmap de CLI** — cliente de terminal em Go (`cli/`, módulo próprio) que fala com a mesma API REST do dashboard web: `login`/`logout` (com fluxo de MFA), `clusters`, `namespaces`, `resources`, `nodes`, `top`, `costs`, `certs`, `storage`, `quotas`, `orphans`, `analysis`, `logs`, `dashboard`, `events` (tail ao vivo via SSE). Saída em tabela por padrão, `--output json` pra scripting. Ver [seção 31](#31-cli-podmon) e `cli/README.md`. Operações de admin/escrita (webhooks, thresholds, usuários, etc.) ficam fora do escopo desta v1, de propósito — ver `cli/README.md`.
+
+#### Correções
+- **SSE quebrado desde a v0.8.0** — o wrapper de métricas HTTP (`withMetrics`, adicionado na v0.8.0) envolve o `http.ResponseWriter` num tipo próprio (`statusWriter`) que não repassava `http.Flusher`. Qualquer handler que dependa de streaming (`GET /api/sse/events`) parava de funcionar atrás desse wrapper — o "Live" da Topologia e a atualização automática do Dashboard via SSE ficaram silenciosamente quebrados em produção por várias horas até serem pegos pelo teste da CLI. Corrigido repassando `Flush()` pro `ResponseWriter` real.
+
+#### Infraestrutura
+- Imagem Docker Hub: `wwrmaia/pod-monitor-backend:0.9.1` (frontend inalterado, permanece em `:0.9.0`)
+- Helm chart: `version: 0.9.1`, `appVersion: "0.9.1"`
+- Nova árvore `cli/` no repositório, módulo Go separado (`pod-monitor/cli`) — não gera imagem Docker, é um binário buildado localmente (`cd cli && go build -o podmon .`)
+
 ### v0.9.0 — 2026-08-28
 
 #### Novas funcionalidades
@@ -2516,6 +2530,36 @@ O baseline de reinícios é só em memória — um redeploy do backend zera a co
 Nenhuma mudança — usa a mesma permissão de `get`/`list` em `pods` já concedida à ClusterRole do backend.
 
 ---
+
+## 31. CLI (`podmon`)
+
+*Adicionado na v0.9.1 — nível 1 do roadmap de CLI (ver `cli/README.md` e a memória do projeto sobre a decisão).*
+
+### O que é
+
+Cliente de terminal (`cli/`, módulo Go próprio — `pod-monitor/cli`) que fala com a mesma API REST usada pelo dashboard web: mesma autenticação (login + MFA), mesmo RBAC (`reader`/`admin`/`dev`), mesmos endpoints de leitura já documentados na seção 5.
+
+### Arquitetura pensada pra evoluir pra TUI depois
+
+```
+cli/
+  cmd/            # comandos Cobra — camada de apresentação
+  internal/client/  # HTTP client + auth + parser de SSE, sem saber nada de terminal
+  internal/config/  # ~/.config/pod-monitor-cli/config.yaml (token, 0600)
+  internal/output/  # tabela (tabwriter) e JSON
+```
+
+`internal/client`/`internal/config` são deliberadamente isolados de `cmd/`/`internal/output` — uma futura TUI interativa (nível 2 do roadmap, ainda não iniciada) reaproveita os dois primeiros por inteiro, só troca a camada de apresentação.
+
+### Comandos (v1 — só leitura)
+
+`login`, `logout`, `clusters`, `namespaces`, `resources`, `nodes`, `top`, `costs`, `certs`, `storage`, `quotas`, `orphans`, `analysis`, `logs`, `dashboard`, `events`. Referência completa e exemplos em `cli/README.md`.
+
+### Limitações conhecidas
+
+- `podmon logs` é um snapshot único — `GET /api/logs` não suporta streaming no backend hoje, então não existe `--follow` de verdade.
+- Sem automação de release/build multi-plataforma — só `go build` local.
+- Escopo desta v1 é só leitura; operações de admin (webhooks, thresholds, usuários, cadastro de cluster, etc.) ficam pra uma fase futura.
 
 ## Apêndice — Estrutura de arquivos
 
