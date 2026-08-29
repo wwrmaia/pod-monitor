@@ -1250,6 +1250,16 @@ func (sw *statusWriter) WriteHeader(code int) {
 	sw.ResponseWriter.WriteHeader(code)
 }
 
+// Flush repassa pro ResponseWriter real — sem isso, qualquer handler atrás de
+// withMetrics que dependa de streaming (SSE em handleSSE) quebra: a
+// type-assertion pra http.Flusher falha porque *statusWriter não a
+// implementava, e o handler cai no fallback de erro 500 "SSE not supported".
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func withMetrics(path string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusWriter{ResponseWriter: w, status: 200}
