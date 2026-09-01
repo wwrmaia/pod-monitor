@@ -12,7 +12,9 @@ ver seção [TUI](#tui-podmon-tui) abaixo. Os dois reaproveitam o mesmo
 (`cmd/`/`internal/tui`) desde o início.
 
 Pra instalar binários pré-compilados (Linux/macOS/Windows) sem precisar do Go,
-ver [`INSTALL.md`](./INSTALL.md).
+ver [`INSTALL.md`](./INSTALL.md) ou rode `./install.sh` (Linux/macOS).
+Manual completo da TUI (todas as telas, atalhos, solução de problemas):
+[`MANUAL_TUI.md`](./MANUAL_TUI.md).
 
 ## Build
 
@@ -21,8 +23,16 @@ cd cli
 go build -o podmon .
 ```
 
-Sem automação de release/binários multi-plataforma por enquanto — `go build`
-é suficiente pra uso local, mesma simplicidade do resto do projeto.
+Sem release automatizado publicado (nenhum binário vai pro GitHub — ver
+`.gitignore`), mas dá pra gerar os 5 binários multi-plataforma localmente:
+
+```bash
+for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+  os="${target%/*}"; arch="${target#*/}"
+  out="podmon-${os}-${arch}"; [ "$os" = windows ] && out="${out}.exe"
+  GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -o "dist/$out" .
+done
+```
 
 ## Uso
 

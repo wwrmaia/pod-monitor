@@ -161,17 +161,33 @@ pra garantir que chegou intacto — `sha256sum arquivo` (Linux/macOS) ou
 `Get-FileHash arquivo` (PowerShell).
 
 ```
-podmon-linux-amd64       fc8f20aff4b40822fd5f6a48e1828aba76dcba6cda56e683dbcb137a75c4e2e9
-podmon-linux-arm64       81c0d57692fb3b481d3fc3ac07eba9d463debe899c9e372a7459cd650961f67d
-podmon-darwin-amd64      844ce509ebec0ecd69fe094be2f2e7d0a9f5ecbb5d458cfd021a751ad8819176
-podmon-darwin-arm64      fdb7b6286b8bac12563af2e297bea349ad1cc8f262f65e31d1cf790341b620d7
-podmon-windows-amd64.exe 2897516878a3a7dddd300a4167cff43db4dcf32408ed29b06464103ba4fcdb3e
+podmon-linux-amd64       849d188ffccfb2dcdf1dec16cfc6488fd2597f875ce17bd328b2bee4a1e88ac9
+podmon-linux-arm64       08302e87b226b3f97c7cb5285bdf77191d26365a0bfdc28b46deea97ce37e8b9
+podmon-darwin-amd64      2d9c904648502fa7c341bcd8c24778192e4933b48b242ed3e16bcac9b8157233
+podmon-darwin-arm64      707a1578bc41ac5af5de52fbe0c752c39dfaea700c6a133fdea848c4c264cfed
+podmon-windows-amd64.exe 2bd1757508dbb375b657e2d84de32355062a28ecc2d62482fe740ace5d5337ec
 ```
 
-> Esses checksums valem para os binários gerados em 2026-08-28. Se você
-> compilar do código-fonte ou gerar uma nova versão, os hashes mudam —
-> recalcule com `sha256sum` (Linux/macOS) ou `Get-FileHash` (Windows) antes
-> de comparar.
+> Esses checksums valem para os binários gerados em 2026-09-01 (já com a
+> TUI — nível 2 do roadmap). Se você compilar do código-fonte ou gerar uma
+> nova versão, os hashes mudam — recalcule com `sha256sum` (Linux/macOS) ou
+> `Get-FileHash` (Windows) antes de comparar. Um `SHA256SUMS.txt` já
+> calculado acompanha `cli/dist/` e `cli/podmon_tui/`.
+
+## 8. Instalação automática (Linux/macOS)
+
+Pra pular os passos manuais das seções 1 e usar o mesmo binário certo pra
+sua máquina, rode o script de instalação de dentro de `cli/` (funciona com
+um binário pronto em `dist/`/`podmon_tui/` ao lado, ou compila do código-fonte
+se tiver Go instalado):
+
+```bash
+cd pod-monitor/cli
+./install.sh                          # instala em ~/.local/bin
+./install.sh --prefix /usr/local/bin  # instala em local do sistema (pode pedir permissão)
+```
+
+Windows não é coberto pelo script — siga a seção Windows acima.
 
 ---
 
