@@ -3746,6 +3746,89 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Write(logs)
 }
 
+// handleLogsStream é o equivalente "-f" de handleLogs: em vez de DoRaw() (uma
+// leitura, buffereada), abre o stream com Follow:true e vai copiando pro
+// ResponseWriter linha a linha, dando Flush a cada pedaço — sem isso o
+// cliente só veria os dados quando a conexão fechasse, igual a handleLogs.
+// Depende do mesmo repasse de http.Flusher através de withMetrics já usado
+// por handleSSE (ver statusWriter.Flush).
+func handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsCtxKey).(*TokenClaims)
+	clients, clusterName, err := getCluster(r)
+	if err != nil { http.Error(w, err.Error(), 400); return }
+	if claims != nil && !devAllowedCluster(claims, clusterName) {
+		http.Error(w, "Forbidden", 403); return
+	}
+
+	ns        := r.URL.Query().Get("namespace")
+	pod       := r.URL.Query().Get("pod")
+	container := r.URL.Query().Get("container")
+	tailStr   := r.URL.Query().Get("tail")
+
+	if ns == "" || pod == "" {
+		http.Error(w, "namespace e pod são obrigatórios", 400)
+		return
+	}
+	if claims != nil && !devAllowedNamespace(claims, ns) {
+		http.Error(w, "Forbidden", 403); return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming não suportado", 500)
+		return
+	}
+
+	opts := &corev1.PodLogOptions{Follow: true}
+	if container != "" {
+		opts.Container = container
+	}
+	if tailStr != "" {
+		var tail int64
+		if _, serr := fmt.Sscanf(tailStr, "%d", &tail); serr == nil && tail > 0 {
+			opts.TailLines = &tail
+		}
+	}
+
+	// Ligado ao contexto da requisição: quando o cliente desconectar (Ctrl+C
+	// do lado do podmon, por exemplo), cancel() derruba o Read() bloqueado
+	// abaixo com um erro, e o loop retorna — sem isso o stream do k8s (e a
+	// goroutine dele) vazaria indefinidamente a cada cliente que desistir.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	stream, err := clients.k8s.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("erro ao abrir stream de logs: %v", err), 500)
+		return
+	}
+	defer stream.Close()
+
+	if claims != nil {
+		auditLog(claims.Username, claims.Role, "pod_logs_stream",
+			fmt.Sprintf("cluster=%s ns=%s pod=%s container=%s", clusterName, ns, pod, container),
+			r.RemoteAddr)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(200)
+	flusher.Flush()
+
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := stream.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return // cliente desconectou
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return // EOF (container reiniciou/terminou) ou ctx cancelado
+		}
+	}
+}
+
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if db == nil { json.NewEncoder(w).Encode([]HistoryRecord{}); return }
@@ -6349,6 +6432,7 @@ func main() {
 	register("/api/clusters",   authMiddleware(handleClusters))
 	register("/api/namespaces", authMiddleware(handleNamespaces))
 	register("/api/logs",       devOrAdminOnly(handleLogs))
+	register("/api/logs/stream", devOrAdminOnly(handleLogsStream))
 
 	// Recursos: dev pode chamar (só para listar pods no contexto de logs)
 	register("/api/resources",  authMiddleware(handleResources))

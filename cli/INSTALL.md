@@ -119,7 +119,7 @@ Toda flag `--cluster` / `-n` (namespace) é global. Qualquer comando aceita
 | `quotas --cluster X` | ResourceQuotas por namespace |
 | `orphans --cluster X` | Recursos órfãos (PVC, Service, ConfigMap...) |
 | `analysis --cluster X` | Varredura de segurança/confiabilidade sob demanda |
-| `logs <pod> -n NS --container C` | Logs do pod — snapshot único, ver limitações |
+| `logs <pod> -n NS --container C [-f]` | Logs do pod — snapshot único, ou tempo real com `-f`/`--follow` |
 | `dashboard --cluster X` | Resumo: pods por fase, nodes, alertas |
 | `events --cluster X` | Tail ao vivo dos eventos (Ctrl+C pra sair) |
 | `logout` | Encerra a sessão e revoga o token |
@@ -136,8 +136,9 @@ Apagar esse arquivo (ou rodar `podmon logout`) equivale a sair da sessão.
 
 ## 5. Limitações conhecidas
 
-- **`podmon logs` não segue (`-f`).** É uma busca única de até N linhas — o
-  backend não expõe streaming de log hoje.
+- **`podmon logs -f` exige um backend atualizado (2026-09-01 ou mais novo).**
+  Contra um backend antigo, sem `/api/logs/stream`, `-f` falha com 404 — use
+  sem `-f` (snapshot de até `--tail` linhas) nesse caso.
 - **Sem operações de escrita/admin.** Webhooks, thresholds, usuários/grupos,
   cadastro de cluster e afins ficam de fora desta v1 — só leitura.
 - **Sem instalador automático.** Sem gerenciador de pacotes (`brew`, `apt`,
@@ -161,20 +162,20 @@ pra garantir que chegou intacto — `sha256sum arquivo` (Linux/macOS) ou
 `Get-FileHash arquivo` (PowerShell).
 
 ```
-podmon-linux-amd64       c0339904cfa591d542477ca8a54b3d009062665b4c7bf23906fbf8834d67a5a0
-podmon-linux-arm64       90899a4f984b513ceef42fda46d9ba630fed22e9a6f4019777fc81f4082e3ff4
-podmon-darwin-amd64      e6e6d6d14449776fd2f9763d4a14206747fe2f67d49365c6e5ab85e45484a22f
-podmon-darwin-arm64      1d4aea1299ac8a1d44397c928ce9b9417ef26cf63f72f5c6cd7964e41bfb89ef
-podmon-windows-amd64.exe c70448c2a0767d472a16fc32eabcc6f71ea878b8e057cdf82f193e9861235718
+podmon-linux-amd64       f0a3cecf94261b3b631eeaafdf4032880ea6479729698fef6e3fa9171424af59
+podmon-linux-arm64       dcdbaaf7f748fd364e2c26614512fba929f996213372d3e580406b6f1617e3a7
+podmon-darwin-amd64      273a261477c980f36be8c7cf0fdc9fc31f50929e5ed8633e7632593af1e6788b
+podmon-darwin-arm64      78281c2b23d0868b904653dd9db3e040cbc22338368e21310de5ed4aaf33270e
+podmon-windows-amd64.exe b1d0b9c9b6c1156bb1cbf57e723ce041d6e378fb706360c93340f8d1d181841d
 ```
 
-> Esses checksums valem para os binários regenerados em 2026-09-01 (fix de um
-> loop de auto-amplificação na tela de dashboard da TUI — reagir ao próprio
-> evento SSE que ela mesma dispara gerava uma tempestade de requisições e de
-> notificações de alerta). Se você compilar do código-fonte ou gerar uma nova
-> versão, os hashes mudam — recalcule com `sha256sum` (Linux/macOS) ou
-> `Get-FileHash` (Windows) antes de comparar. Um `SHA256SUMS.txt` já
-> calculado acompanha `cli/dist/` e `cli/podmon_tui/`.
+> Esses checksums valem para os binários regenerados em 2026-09-01 (adição de
+> `podmon logs -f`/`--follow`, tail de logs em tempo real — precisa do
+> backend na mesma versão ou mais nova, que expõe `/api/logs/stream`). Se
+> você compilar do código-fonte ou gerar uma nova versão, os hashes mudam —
+> recalcule com `sha256sum` (Linux/macOS) ou `Get-FileHash` (Windows) antes
+> de comparar. Um `SHA256SUMS.txt` já calculado acompanha `cli/dist/` e
+> `cli/podmon_tui/`.
 
 ## 8. Instalação automática (Linux/macOS)
 

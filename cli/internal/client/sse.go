@@ -18,7 +18,7 @@ type Event struct {
 // Não usa nenhuma biblioteca de SSE — o formato já é texto plano simples o
 // bastante pra um bufio.Scanner linha a linha.
 func (c *Client) StreamEvents(ctx context.Context) (<-chan Event, error) {
-	resp, err := c.RawGet("/api/sse/events")
+	resp, err := c.RawGet(ctx, "/api/sse/events", nil)
 	if err != nil {
 		return nil, err
 	}

@@ -69,7 +69,7 @@ podmon --output json costs --cluster prod-eks | jq '.items[] | select(.cost_mont
 | `quotas` | Quotas | |
 | `orphans` | Auditoria | recursos órfãos (PVC, Service, ConfigMap, Secret, Ingress, ServiceAccount) |
 | `analysis` | Análise | roda a varredura de segurança/confiabilidade/boas práticas sob demanda |
-| `logs <pod>` | Logs | **snapshot único, não é streaming** — ver limitação abaixo |
+| `logs <pod>` | Logs | snapshot único por padrão; `-f`/`--follow` segue em tempo real |
 | `events` | (SSE interno) | tail ao vivo de todos os eventos do backend |
 | `tui` | — | painel interativo, ver seção [TUI](#tui-podmon-tui) |
 
@@ -120,12 +120,17 @@ backend. As seis telas de recurso (nodes/storage/quotas/orphans/custos/certs)
 buscam ao abrir e com `r` manual — mudam devagar o bastante pra não precisar
 de polling automático.
 
-## Limitação conhecida: `podmon logs` não segue (`-f`)
+## Logs em tempo real (`podmon logs -f`)
 
-O endpoint `GET /api/logs` do backend busca uma quantidade fixa de linhas uma
-única vez (`--tail`, padrão 200) — não existe streaming de logs no servidor
-hoje. `podmon logs` reflete isso honestamente: não tem flag `--follow`. Um
-`tail -f` de verdade exigiria trabalho novo no backend, não só na CLI.
+`podmon logs <pod> -n NS -f` segue os logs em tempo real (equivalente a
+`kubectl logs -f`), usando `GET /api/logs/stream` (backend com `Follow:true`
++ `Flush()` a cada linha). Sem `-f`, continua sendo o comportamento antigo —
+uma busca única de até `--tail` linhas (padrão 200). `Ctrl+C` encerra a
+sessão de forma limpa (cancela o contexto, não mata o processo na marra).
+
+**Requer backend na mesma versão ou mais nova** (o endpoint `/api/logs/stream`
+não existe em backends anteriores a 2026-09-01) — contra um backend antigo,
+`-f` falha com 404.
 
 ## Configuração local
 

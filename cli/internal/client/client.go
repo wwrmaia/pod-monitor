@@ -5,6 +5,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,17 +148,39 @@ func (c *Client) GetText(path string, query url.Values) (string, error) {
 	return string(body), nil
 }
 
-// RawGet devolve a resposta bruta — usado por SSE, que não é JSON de resposta
-// única (é um stream de "event:"/"data:" linha a linha). Usa um http.Client
-// próprio sem timeout total, já que a conexão fica aberta indefinidamente.
-func (c *Client) RawGet(path string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, c.url(path, nil), nil)
+// StreamLogs abre /api/logs/stream (Follow:true no backend) e devolve o
+// corpo da resposta pra quem chamar copiar linha a linha (ex.: io.Copy pro
+// stdout) — quem chama é responsável por fechar o io.ReadCloser retornado
+// (encerra o Read() bloqueado no backend, ver handleLogsStream). Cancelar
+// ctx (Ctrl+C) também encerra a leitura, sem esperar o servidor fechar.
+func (c *Client) StreamLogs(ctx context.Context, query url.Values) (io.ReadCloser, error) {
+	resp, err := c.RawGet(ctx, "/api/logs/stream", query)
+	if err != nil {
+		return nil, fmt.Errorf("não foi possível conectar em %s: %w", c.Server, err)
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, &APIError{Status: resp.StatusCode, Body: string(bytes.TrimSpace(body))}
+	}
+	return resp.Body, nil
+}
+
+// RawGet devolve a resposta bruta — usado por SSE e pelo tail de logs, que
+// não são JSON de resposta única (streams de texto linha a linha). Usa um
+// http.Client próprio sem timeout total, já que a conexão fica aberta
+// indefinidamente; req.WithContext(ctx) é o que permite ao chamador encerrar
+// uma leitura bloqueada (ex.: Ctrl+C) cancelando o ctx em vez de esperar o
+// servidor fechar a conexão.
+func (c *Client) RawGet(ctx context.Context, path string, query url.Values) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, c.url(path, query), nil)
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	streamClient := &http.Client{} // sem Timeout — SSE é uma conexão longa
+	streamClient := &http.Client{} // sem Timeout — stream é uma conexão longa
 	return streamClient.Do(req)
 }
