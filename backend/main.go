@@ -242,6 +242,34 @@ var dockerAPIVerMu    sync.RWMutex
 var dockerIsCluster   = map[string]bool{}   // name → true se tem containers k8s
 var dockerIsClusterMu sync.RWMutex
 
+// dashboardAlertThrottle evita reenviar o webhook de alerta %-based
+// (critical/warning, ver handleDashboardSummary) a cada chamada do endpoint —
+// diferente de cert/restart_storm/oom_killed, esse gatilho nunca teve dedup,
+// e /api/dashboard/summary pode ser chamado com muito mais frequência do que
+// os 5min do polling padrão do frontend (múltiplos clientes, TUI, CLI em
+// loop, ou um bug de cliente reagindo ao próprio SSE que ele mesmo dispara —
+// caso real que gerou uma tempestade de e-mail bloqueada por rate-limit do
+// Gmail em 2026-09-01). Chave é cluster+severidade; em memória, não precisa
+// sobreviver a restart do backend.
+var dashboardAlertThrottleMu   sync.Mutex
+var dashboardAlertThrottle     = map[string]time.Time{}
+const dashboardAlertThrottleWindow = 5 * time.Minute
+
+// shouldSendDashboardAlert retorna true no máximo 1x por janela, por
+// cluster+severidade — chamadas subsequentes dentro da janela são
+// silenciosamente descartadas (o alerta em si continua visível no dashboard,
+// só a notificação externa é que é limitada).
+func shouldSendDashboardAlert(cluster, severity string) bool {
+	key := cluster + "|" + severity
+	dashboardAlertThrottleMu.Lock()
+	defer dashboardAlertThrottleMu.Unlock()
+	if last, ok := dashboardAlertThrottle[key]; ok && time.Since(last) < dashboardAlertThrottleWindow {
+		return false
+	}
+	dashboardAlertThrottle[key] = time.Now()
+	return true
+}
+
 func initDockerHosts() {
 	hostsEnv := os.Getenv("DOCKER_HOSTS")
 	// Formato: nome=/var/run/docker.sock  ou  nome=tcp://host:2375
@@ -3982,20 +4010,27 @@ func handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Dispara webhooks para alertas críticos e avisa via SSE
+	// Dispara webhooks para alertas críticos e avisa via SSE — no máximo 1x
+	// por janela (dashboardAlertThrottleWindow) por cluster+severidade, já
+	// que este endpoint pode ser chamado com frequência bem maior que o
+	// polling de 5min do frontend (múltiplos clientes, TUI, CLI).
 	if summary.Alerts.Critical > 0 {
-		go triggerWebhooks("critical", map[string]interface{}{
-			"cluster":  clusterName,
-			"critical": summary.Alerts.Critical,
-			"warning":  summary.Alerts.Warning,
-			"pods":     summary.AlertPods,
-		})
+		if shouldSendDashboardAlert(clusterName, "critical") {
+			go triggerWebhooks("critical", map[string]interface{}{
+				"cluster":  clusterName,
+				"critical": summary.Alerts.Critical,
+				"warning":  summary.Alerts.Warning,
+				"pods":     summary.AlertPods,
+			})
+		}
 	} else if summary.Alerts.Warning > 0 {
-		go triggerWebhooks("warning", map[string]interface{}{
-			"cluster": clusterName,
-			"warning": summary.Alerts.Warning,
-			"pods":    summary.AlertPods,
-		})
+		if shouldSendDashboardAlert(clusterName, "warning") {
+			go triggerWebhooks("warning", map[string]interface{}{
+				"cluster": clusterName,
+				"warning": summary.Alerts.Warning,
+				"pods":    summary.AlertPods,
+			})
+		}
 	}
 
 	// Publica evento SSE para clientes conectados

@@ -82,8 +82,9 @@ type model struct {
 	loadingNamespaces bool
 	loadingPods       bool
 
-	dash       dashSummary
-	dashLoaded bool
+	dash            dashSummary
+	dashLoaded      bool
+	lastDashFetchAt time.Time
 
 	nodes     []nodeResources
 	nodeTable table.Model
@@ -353,6 +354,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case screenPods:
 			return m, tea.Batch(fetchResources(m.client, m.cluster, m.namespace), tickAfter(resourcesPollInterval, screenPods))
 		case screenDashboard:
+			m.lastDashFetchAt = time.Now()
 			return m, tea.Batch(fetchDashboard(m.client, m.cluster), tickAfter(dashboardPollInterval, screenDashboard))
 		}
 		return m, nil
@@ -372,7 +374,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.screen == screenPods {
 				cmds = append(cmds, fetchResources(m.client, m.cluster, m.namespace))
 			}
-			if m.screen == screenDashboard {
+			// Debounce contra loop de auto-amplificação: /api/dashboard/summary
+			// é o que PUBLICA este mesmo evento "summary" via SSE (ver
+			// backend main.go, handleDashboardSummary) — sem esse debounce,
+			// esta própria busca reaciona o evento que ela mesma gera, e
+			// qualquer TUI parada na tela de dashboard vira um loop
+			// autossustentado (visto na prática: ~1-2 req/s ininterruptos,
+			// e cada uma redispara os webhooks de alerta crítico sem dedup
+			// no backend — gerou uma tempestade de e-mail bloqueada por
+			// rate-limit do Gmail). dashboardPollInterval já cobre o
+			// refresh periódico; aqui só reage a eventos de OUTRAS origens
+			// que cheguem fora dessa janela.
+			if m.screen == screenDashboard && time.Since(m.lastDashFetchAt) >= dashboardPollInterval {
+				m.lastDashFetchAt = time.Now()
 				cmds = append(cmds, fetchDashboard(m.client, m.cluster))
 			}
 		case "topology_refresh":
@@ -475,6 +489,7 @@ func (m model) gotoDashboard() (model, tea.Cmd) {
 		return m, nil
 	}
 	m.dashLoaded = false
+	m.lastDashFetchAt = time.Now()
 	return m.openOverlay(screenDashboard, fetchDashboard(m.client, m.cluster), tickAfter(dashboardPollInterval, screenDashboard))
 }
 

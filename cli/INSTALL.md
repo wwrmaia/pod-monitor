@@ -161,19 +161,20 @@ pra garantir que chegou intacto — `sha256sum arquivo` (Linux/macOS) ou
 `Get-FileHash arquivo` (PowerShell).
 
 ```
-podmon-linux-amd64       7898242cbd092cf99048dac93563f5cabb077ca85f893cf5078495296b20e18e
-podmon-linux-arm64       ccb4c271defd273e32088c518455dd40304262edd3431cfb41dd58bc00a9236d
-podmon-darwin-amd64      8fdb991d4c4b638ceda80cb38975e8f22ccbeb4c52e0d4a98e18381f1a65f075
-podmon-darwin-arm64      53af8b73fcd01680e004c550ea2398127df08f238e5c33a0ac3fe174c7d216bb
-podmon-windows-amd64.exe b42fd812bd4a8650999b115a60d079deaab2e28fbef7b657fd133196323986e0
+podmon-linux-amd64       c0339904cfa591d542477ca8a54b3d009062665b4c7bf23906fbf8834d67a5a0
+podmon-linux-arm64       90899a4f984b513ceef42fda46d9ba630fed22e9a6f4019777fc81f4082e3ff4
+podmon-darwin-amd64      e6e6d6d14449776fd2f9763d4a14206747fe2f67d49365c6e5ab85e45484a22f
+podmon-darwin-arm64      1d4aea1299ac8a1d44397c928ce9b9417ef26cf63f72f5c6cd7964e41bfb89ef
+podmon-windows-amd64.exe c70448c2a0767d472a16fc32eabcc6f71ea878b8e057cdf82f193e9861235718
 ```
 
-> Esses checksums valem para os binários regenerados em 2026-09-01 (fix do
-> `esc` não limpando o filtro já confirmado na tela de pods da TUI). Se você
-> compilar do código-fonte ou gerar uma nova versão, os hashes mudam —
-> recalcule com `sha256sum` (Linux/macOS) ou `Get-FileHash` (Windows) antes
-> de comparar. Um `SHA256SUMS.txt` já calculado acompanha `cli/dist/` e
-> `cli/podmon_tui/`.
+> Esses checksums valem para os binários regenerados em 2026-09-01 (fix de um
+> loop de auto-amplificação na tela de dashboard da TUI — reagir ao próprio
+> evento SSE que ela mesma dispara gerava uma tempestade de requisições e de
+> notificações de alerta). Se você compilar do código-fonte ou gerar uma nova
+> versão, os hashes mudam — recalcule com `sha256sum` (Linux/macOS) ou
+> `Get-FileHash` (Windows) antes de comparar. Um `SHA256SUMS.txt` já
+> calculado acompanha `cli/dist/` e `cli/podmon_tui/`.
 
 ## 8. Instalação automática (Linux/macOS)
 
