@@ -598,6 +598,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case isOverlayScreen(m.screen):
 			m.screen = m.prevScreen
+		case m.screen == screenPods && m.filterInput.Value() != "":
+			// Esc já limpa o filtro enquanto se digita (bloco m.filtering
+			// acima) — aqui cobre o caso de um filtro já CONFIRMADO (Enter),
+			// onde Esc antes caía direto no "voltar pra namespaces" e deixava
+			// o filtro aplicado silenciosamente sem forma de limpar num só
+			// toque. Primeiro Esc limpa; segundo Esc (filtro já vazio) volta.
+			m.filterInput.SetValue("")
+			m.refreshPodTable()
 		case m.screen == screenPods:
 			m.screen = screenNamespaces
 		case m.screen == screenNamespaces:

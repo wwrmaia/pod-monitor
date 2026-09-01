@@ -111,7 +111,10 @@ quando "todos os namespaces" está selecionado).
   o metrics-server não está disponível — isso é diferente de "0% de uso",
   não é tratado como dado real.
 - `/`: abre um filtro por nome de pod/container (digite, `enter` confirma e
-  mantém o filtro aplicado, `esc` limpa e cancela).
+  mantém o filtro aplicado). `esc` limpa o filtro — funciona tanto enquanto
+  você digita quanto depois de já ter confirmado com `enter` (nesse segundo
+  caso, um `esc` limpa; um segundo `esc`, com o filtro já vazio, volta pra
+  namespaces).
 - `c`: cicla a ordenação da tabela — nome → CPU% → MEM% → nome...
 
 ## 6. Telas de recurso (overlays)
