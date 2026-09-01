@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,7 @@ const (
 	screenQuotas
 	screenOrphans
 	screenCerts
+	screenHelp
 )
 
 // isBaseScreen reporta se s é uma das 3 telas do fluxo linear principal
@@ -47,6 +49,10 @@ const (
 type model struct {
 	client *client.Client
 
+	// só alimentam o header (barra de contexto) — nenhuma lógica de
+	// autorização depende disso na TUI, o backend já fez RBAC.
+	username, role string
+
 	screen     screen
 	prevScreen screen
 
@@ -58,6 +64,11 @@ type model struct {
 	podTable    table.Model
 	filterInput textinput.Model
 	filtering   bool
+
+	spinner spinner.Model
+
+	commanding bool
+	cmdInput   textinput.Model
 
 	pods    []podResources
 	sortCol int // 0=nome, 1=CPU%, 2=MEM%
@@ -110,12 +121,21 @@ type model struct {
 	presetNamespace string
 }
 
-func newModel(c *client.Client, presetCluster, presetNamespace string) model {
+func newModel(c *client.Client, username, role, presetCluster, presetNamespace string) model {
 	fi := textinput.New()
 	fi.Placeholder = "filtrar por pod/container..."
 
+	ci := textinput.New()
+	ci.Prompt = ":"
+	ci.Placeholder = "nodes, storage, quotas, orphans, costs, certs, dashboard, help..."
+
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
+	sp.Style = logoStyle
+
 	return model{
 		client:          c,
+		username:        username,
+		role:            role,
 		screen:          screenClusters,
 		clusterList:     newSelectList("Clusters"),
 		nsList:          newSelectList("Namespaces"),
@@ -127,6 +147,8 @@ func newModel(c *client.Client, presetCluster, presetNamespace string) model {
 		orphansTable:    newTable(),
 		certsTable:      newTable(),
 		filterInput:     fi,
+		cmdInput:        ci,
+		spinner:         sp,
 		sseBackoff:      sseInitialBackoff,
 		presetCluster:   presetCluster,
 		presetNamespace: presetNamespace,
@@ -142,11 +164,11 @@ func newSelectList(title string) list.Model {
 }
 
 func newTable() table.Model {
-	return table.New(table.WithFocused(true))
+	return table.New(table.WithFocused(true), table.WithStyles(tableStyles()))
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchClusters(m.client), startSSE(m.client))
+	return tea.Batch(fetchClusters(m.client), startSSE(m.client), m.spinner.Tick)
 }
 
 func toListItems(names []string) []list.Item {
@@ -162,18 +184,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.clusterList.SetSize(msg.Width, msg.Height-2)
-		m.nsList.SetSize(msg.Width, msg.Height-2)
+
+		// Largura/altura de conteúdo descontam a borda do painel (item de
+		// polimento visual) e, quando o header está visível (terminal alto o
+		// bastante — ver renderHeader), as linhas que ele consome. Números
+		// de partida — ajustados olhando a renderização real, layout
+		// vertical não dá pra acertar só lendo código.
+		//
+		// -1 extra de margem de segurança: com contentWidth+panelOverheadWidth
+		// batendo exatamente na largura do terminal (zero folga), a borda
+		// direita do painel some — o terminal quebra a linha sozinho bem no
+		// último caractere antes de desenhá-la (visto ao testar num terminal
+		// de 140 colunas). Sobrar 1 coluna evita o encontro exato.
+		contentWidth := msg.Width - panelOverheadWidth - 1
+		if contentWidth < 20 {
+			contentWidth = msg.Width
+		}
+		reserved := 4 + panelOverheadHeight // linha de título da tela + rodapé de ajuda + borda
+		if msg.Height >= headerMinHeight {
+			reserved += headerHeight
+		}
+		contentHeight := msg.Height - reserved
+		if contentHeight < 5 {
+			contentHeight = 5
+		}
+
+		m.clusterList.SetSize(contentWidth, contentHeight)
+		m.nsList.SetSize(contentWidth, contentHeight)
 		for _, t := range []*table.Model{&m.podTable, &m.nodeTable, &m.storageTable, &m.costsTable, &m.quotasTable, &m.orphansTable, &m.certsTable} {
-			t.SetWidth(msg.Width)
-			if h := msg.Height - 6; h > 0 {
-				t.SetHeight(h)
-			}
+			t.SetWidth(contentWidth)
+			t.SetHeight(contentHeight)
 		}
 		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case spinner.TickMsg:
+		// Fica ticando pra sempre desde o Init() — mais simples do que
+		// iniciar/parar o tick em cada um dos ~10 pontos que setam algum
+		// loading*=true, e sem efeito visível quando ocioso (só é
+		// *renderizado* — ver loadingOrEmpty em styles.go — quando algum
+		// loading* está true; o tick em si é barato pra uma TUI em
+		// primeiro plano).
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case clustersLoadedMsg:
 		m.clusterList.SetItems(toListItems(msg.clusters))
@@ -409,12 +465,78 @@ func refreshCmdFor(m model) tea.Cmd {
 	return nil
 }
 
+// gotoDashboard/gotoNodes/.../gotoCerts são o corpo de cada tecla de atalho
+// de overlay, extraídos pra método — tanto handleKey (tecla de atalho)
+// quanto gotoScreen (barra de comando, ver command.go) chamam o mesmo
+// código, nunca duplicado entre os dois pontos de entrada.
+
+func (m model) gotoDashboard() (model, tea.Cmd) {
+	if m.screen == screenDashboard {
+		return m, nil
+	}
+	m.dashLoaded = false
+	return m.openOverlay(screenDashboard, fetchDashboard(m.client, m.cluster), tickAfter(dashboardPollInterval, screenDashboard))
+}
+
+func (m model) gotoNodes() (model, tea.Cmd) {
+	if m.screen == screenNodes {
+		return m, nil
+	}
+	m.loadingNodes = true
+	return m.openOverlay(screenNodes, fetchNodes(m.client, m.cluster))
+}
+
+func (m model) gotoStorage() (model, tea.Cmd) {
+	if m.screen == screenStorage {
+		return m, nil
+	}
+	m.loadingStorage = true
+	return m.openOverlay(screenStorage, fetchStorage(m.client, m.cluster))
+}
+
+func (m model) gotoQuotas() (model, tea.Cmd) {
+	if m.screen == screenQuotas {
+		return m, nil
+	}
+	m.loadingQuotas = true
+	return m.openOverlay(screenQuotas, fetchQuotas(m.client, m.cluster, m.namespace))
+}
+
+func (m model) gotoOrphans() (model, tea.Cmd) {
+	if m.screen == screenOrphans {
+		return m, nil
+	}
+	m.loadingOrphans = true
+	return m.openOverlay(screenOrphans, fetchOrphans(m.client, m.cluster))
+}
+
+func (m model) gotoCosts() (model, tea.Cmd) {
+	if m.screen == screenCosts {
+		return m, nil
+	}
+	m.costsLoaded = false
+	m.loadingCosts = true
+	return m.openOverlay(screenCosts, fetchCosts(m.client, m.cluster, m.namespace))
+}
+
+func (m model) gotoCerts() (model, tea.Cmd) {
+	if m.screen == screenCerts {
+		return m, nil
+	}
+	m.loadingCerts = true
+	return m.openOverlay(screenCerts, fetchCerts(m.client, m.cluster, m.namespace))
+}
+
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.authExpired {
 		if key.Matches(msg, keys.Quit) {
 			return m, tea.Quit
 		}
 		return m, nil
+	}
+
+	if m.commanding {
+		return m.handleCommandMode(msg)
 	}
 
 	if m.filtering {
@@ -443,54 +565,34 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case key.Matches(msg, keys.Dashboard):
-		if m.screen == screenDashboard {
-			return m, nil
-		}
-		m.dashLoaded = false
-		return m.openOverlay(screenDashboard, fetchDashboard(m.client, m.cluster), tickAfter(dashboardPollInterval, screenDashboard))
+		return m.gotoDashboard()
 
 	case key.Matches(msg, keys.Nodes):
-		if m.screen == screenNodes {
-			return m, nil
-		}
-		m.loadingNodes = true
-		return m.openOverlay(screenNodes, fetchNodes(m.client, m.cluster))
+		return m.gotoNodes()
 
 	case key.Matches(msg, keys.Storage):
-		if m.screen == screenStorage {
-			return m, nil
-		}
-		m.loadingStorage = true
-		return m.openOverlay(screenStorage, fetchStorage(m.client, m.cluster))
+		return m.gotoStorage()
 
 	case key.Matches(msg, keys.Quotas):
-		if m.screen == screenQuotas {
-			return m, nil
-		}
-		m.loadingQuotas = true
-		return m.openOverlay(screenQuotas, fetchQuotas(m.client, m.cluster, m.namespace))
+		return m.gotoQuotas()
 
 	case key.Matches(msg, keys.Orphans):
-		if m.screen == screenOrphans {
-			return m, nil
-		}
-		m.loadingOrphans = true
-		return m.openOverlay(screenOrphans, fetchOrphans(m.client, m.cluster))
+		return m.gotoOrphans()
 
 	case key.Matches(msg, keys.Costs):
-		if m.screen == screenCosts {
-			return m, nil
-		}
-		m.costsLoaded = false
-		m.loadingCosts = true
-		return m.openOverlay(screenCosts, fetchCosts(m.client, m.cluster, m.namespace))
+		return m.gotoCosts()
 
 	case key.Matches(msg, keys.Certs):
-		if m.screen == screenCerts {
-			return m, nil
-		}
-		m.loadingCerts = true
-		return m.openOverlay(screenCerts, fetchCerts(m.client, m.cluster, m.namespace))
+		return m.gotoCerts()
+
+	case key.Matches(msg, keys.Command):
+		m.commanding = true
+		m.cmdInput.Focus()
+		m.cmdInput.SetValue("")
+		return m, nil
+
+	case key.Matches(msg, keys.Help):
+		return m.gotoScreen(screenHelp)
 
 	case key.Matches(msg, keys.Back):
 		switch {
@@ -526,6 +628,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateCosts(msg)
 	case screenCerts:
 		return m.updateCerts(msg)
+	case screenHelp:
+		return m.updateHelp(msg)
 	}
 	return m, nil
 }
@@ -557,10 +661,19 @@ func (m model) View() string {
 		body = m.viewCosts()
 	case screenCerts:
 		body = m.viewCerts()
+	case screenHelp:
+		body = m.viewHelp()
 	}
 
-	if m.err != "" {
-		body += "\n" + errStyle.Render("erro: "+m.err)
+	out := body
+	if header := renderHeader(m); header != "" {
+		out = header + "\n" + body
 	}
-	return body
+	if m.commanding {
+		out += "\n" + m.cmdInput.View()
+	}
+	if m.err != "" {
+		out += "\n" + errStyle.Render("erro: "+m.err)
+	}
+	return out
 }

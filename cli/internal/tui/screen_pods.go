@@ -187,12 +187,13 @@ func (m model) updatePods(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) viewPods() string {
 	header := fmt.Sprintf("Cluster: %s   Namespace: %s   Ordenar: %s",
 		m.cluster, nsLabel(m.namespace), sortLabel(m.sortCol))
-	view := titleStyle.Render(header) + "\n"
+	var content string
 	if len(m.podTable.Rows()) == 0 {
-		view += dimStyle.Render(loadingOrEmpty(m.loadingPods))
+		content = m.loadingOrEmpty(m.loadingPods)
 	} else {
-		view += m.podTable.View()
+		content = m.podTable.View()
 	}
+	view := titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width)
 	if m.filtering || m.filterInput.Value() != "" {
 		view += "\nFiltro: " + m.filterInput.View()
 	}

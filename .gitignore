@@ -3,6 +3,7 @@ backend/api
 backend/backend
 cli/podmon
 cli/dist/
+cli/podmon_tui/
 
 # Go build cache
 backend/*.test

@@ -38,12 +38,11 @@ func (m model) updateNodes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewNodes() string {
 	header := fmt.Sprintf("Cluster: %s   Nodes", m.cluster)
-	view := titleStyle.Render(header) + "\n"
+	var content string
 	if len(m.nodeTable.Rows()) == 0 {
-		view += dimStyle.Render(loadingOrEmpty(m.loadingNodes))
+		content = m.loadingOrEmpty(m.loadingNodes)
 	} else {
-		view += m.nodeTable.View()
+		content = m.nodeTable.View()
 	}
-	view += "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
-	return view
+	return titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width) + "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
 }

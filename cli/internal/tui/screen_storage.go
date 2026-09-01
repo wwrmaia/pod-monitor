@@ -36,12 +36,11 @@ func (m model) updateStorage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewStorage() string {
 	header := fmt.Sprintf("Cluster: %s   Storage (PVCs)", m.cluster)
-	view := titleStyle.Render(header) + "\n"
+	var content string
 	if len(m.storageTable.Rows()) == 0 {
-		view += dimStyle.Render(loadingOrEmpty(m.loadingStorage))
+		content = m.loadingOrEmpty(m.loadingStorage)
 	} else {
-		view += m.storageTable.View()
+		content = m.storageTable.View()
 	}
-	view += "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
-	return view
+	return titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width) + "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
 }

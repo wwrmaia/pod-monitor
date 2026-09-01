@@ -32,11 +32,11 @@ func (m model) updateNamespaces(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewNamespaces() string {
 	header := titleStyle.Render("Cluster: " + m.cluster)
-	var body string
+	var content string
 	if len(m.nsList.Items()) == 0 {
-		body = header + "\n" + dimStyle.Render(loadingOrEmpty(m.loadingNamespaces))
+		content = m.loadingOrEmpty(m.loadingNamespaces)
 	} else {
-		body = header + "\n" + m.nsList.View()
+		content = m.nsList.View()
 	}
-	return body + "\n" + helpStyle.Render(overlayHelpFooter)
+	return header + "\n" + renderPanel(content) + "\n" + helpStyle.Render(overlayHelpFooter)
 }

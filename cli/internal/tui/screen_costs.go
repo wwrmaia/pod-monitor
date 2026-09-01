@@ -50,21 +50,20 @@ func (m model) updateCosts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewCosts() string {
 	header := fmt.Sprintf("Cluster: %s   Namespace: %s   Custos", m.cluster, nsLabel(m.namespace))
-	view := titleStyle.Render(header) + "\n"
 
+	var content string
 	switch {
 	case !m.costsLoaded:
-		view += dimStyle.Render(loadingOrEmpty(m.loadingCosts))
+		content = m.loadingOrEmpty(m.loadingCosts)
 	case !m.costs.Enabled:
-		view += dimStyle.Render("Estimativa de custo desabilitada pra este cluster (padrão off — só faz sentido pra clusters de nuvem com cobrança por hora).")
+		content = dimStyle.Render("Estimativa de custo desabilitada pra este cluster (padrão off — só faz sentido pra clusters de nuvem com cobrança por hora).")
 	case !m.costs.Configured:
-		view += dimStyle.Render("Estimativa de custo habilitada, mas sem preço configurado ainda.")
+		content = dimStyle.Render("Estimativa de custo habilitada, mas sem preço configurado ainda.")
 	case len(m.costsTable.Rows()) == 0:
-		view += dimStyle.Render("(nenhum resultado)")
+		content = dimStyle.Render("(nenhum resultado)")
 	default:
-		view += m.costsTable.View()
+		content = m.costsTable.View()
 	}
 
-	view += "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
-	return view
+	return titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width) + "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
 }

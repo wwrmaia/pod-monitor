@@ -93,7 +93,16 @@ você estava:
 | `t` | Certificados TLS |
 
 Na tabela de pods: `/` filtra por nome, `c` cicla ordenação (nome/CPU%/MEM%).
-Em qualquer tela: `r` força atualização, `q`/`Ctrl+C` sai.
+Em qualquer tela: `r` força atualização, `?` abre a ajuda completa, `:` abre
+uma barra de comando (digite `nodes`, `costs`, `dashboard` etc. e `enter` —
+alternativa às teclas de atalho, útil se você não decorou os atalhos),
+`q`/`Ctrl+C` sai.
+
+Uma barra de contexto fixa no topo mostra cluster/namespace/usuário atuais e
+um resumo de alertas (do último dashboard já visitado); a logo do podmon
+aparece à direita em terminais largos o bastante. Tabelas/listas ganham
+borda quando cabem no terminal — numa tela muito estreita pra tabela de pods
+(13-14 colunas), a borda some sozinha em vez de aparecer quebrada.
 
 Atualização automática: a tabela de pods e o dashboard pollam sozinhos
 (8s/10s) enquanto abertos, mais um empurrão extra via SSE quando algo muda no

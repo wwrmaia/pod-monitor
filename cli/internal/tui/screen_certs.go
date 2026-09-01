@@ -36,12 +36,12 @@ func (m model) updateCerts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewCerts() string {
 	header := fmt.Sprintf("Cluster: %s   Namespace: %s   Certificados TLS", m.cluster, nsLabel(m.namespace))
-	view := titleStyle.Render(header) + "\n"
+	var content string
 	if len(m.certsTable.Rows()) == 0 {
-		view += dimStyle.Render(loadingOrEmpty(m.loadingCerts))
+		content = m.loadingOrEmpty(m.loadingCerts)
 	} else {
-		view += m.certsTable.View()
+		content = m.certsTable.View()
 	}
-	view += "\n" + helpStyle.Render("bucket: ok/notice/warning/critical/expired (calculado pelo backend) | r atualizar | esc voltar | q sair")
-	return view
+	return titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width) + "\n" +
+		helpStyle.Render("bucket: ok/notice/warning/critical/expired (calculado pelo backend) | r atualizar | esc voltar | q sair")
 }

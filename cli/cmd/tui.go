@@ -3,6 +3,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
+	"pod-monitor/cli/internal/config"
 	"pod-monitor/cli/internal/tui"
 )
 
@@ -14,7 +15,11 @@ var tuiCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return tui.Run(c, flagCluster, flagNamespace)
+		cfg, err := config.Load() // já validado por authedClient(); só pra ler username/role pro header
+		if err != nil {
+			return err
+		}
+		return tui.Run(c, cfg.Username, cfg.Role, flagCluster, flagNamespace)
 	},
 }
 

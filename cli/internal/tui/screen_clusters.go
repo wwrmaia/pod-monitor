@@ -22,11 +22,11 @@ func (m model) updateClusters(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) viewClusters() string {
-	var body string
+	var content string
 	if len(m.clusterList.Items()) == 0 {
-		body = titleStyle.Render("Clusters") + "\n" + dimStyle.Render(loadingOrEmpty(m.loadingClusters))
+		content = titleStyle.Render("Clusters") + "\n" + m.loadingOrEmpty(m.loadingClusters)
 	} else {
-		body = m.clusterList.View()
+		content = m.clusterList.View()
 	}
-	return body + "\n" + helpStyle.Render(overlayHelpFooter)
+	return renderPanel(content) + "\n" + helpStyle.Render(overlayHelpFooter)
 }

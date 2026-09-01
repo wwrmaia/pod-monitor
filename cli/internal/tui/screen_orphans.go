@@ -46,12 +46,11 @@ func (m model) updateOrphans(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) viewOrphans() string {
 	header := fmt.Sprintf("Cluster: %s   Auditoria (recursos órfãos, todos os namespaces)", m.cluster)
-	view := titleStyle.Render(header) + "\n"
+	var content string
 	if len(m.orphansTable.Rows()) == 0 {
-		view += dimStyle.Render(loadingOrEmpty(m.loadingOrphans))
+		content = m.loadingOrEmpty(m.loadingOrphans)
 	} else {
-		view += m.orphansTable.View()
+		content = m.orphansTable.View()
 	}
-	view += "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
-	return view
+	return titleStyle.Render(header) + "\n" + renderPanelFit(content, m.width) + "\n" + helpStyle.Render("r atualizar | esc voltar | q sair")
 }

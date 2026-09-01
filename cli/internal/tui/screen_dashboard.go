@@ -10,14 +10,13 @@ import (
 // campos já computados pelo backend (AlertPods[].Severity, TopCPU/TopMem[].Pct),
 // que são autoritativos (a tela de pods usa uma aproximação, ver units.go).
 func (m model) viewDashboard() string {
+	header := titleStyle.Render(fmt.Sprintf("Dashboard — cluster %s", m.cluster))
 	if !m.dashLoaded {
-		return "Carregando dashboard..."
+		return header + "\n" + renderPanel(m.loadingOrEmpty(true))
 	}
 	d := m.dash
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(fmt.Sprintf("Dashboard — cluster %s", m.cluster)))
-	b.WriteString("\n\n")
 
 	b.WriteString(fmt.Sprintf("Nodes: %d/%d prontos", d.Nodes.Ready, d.Nodes.Total))
 	if len(d.Nodes.NotReadyNames) > 0 {
@@ -58,6 +57,5 @@ func (m model) viewDashboard() string {
 		b.WriteString(fmt.Sprintf("  %s/%s (%s) — %d%%\n", w.Namespace, w.Pod, w.Name, w.Pct))
 	}
 
-	b.WriteString("\n" + helpStyle.Render("r atualizar | esc fechar | q sair"))
-	return b.String()
+	return header + "\n" + renderPanel(b.String()) + "\n" + helpStyle.Render("r atualizar | esc fechar | q sair")
 }

@@ -11,11 +11,12 @@ import (
 	"pod-monitor/cli/internal/client"
 )
 
-// Run inicia o programa da TUI. presetCluster/presetNamespace, se não
-// vazios, pulam direto pra tela de pods assim que a respectiva lista
-// carregar (ver clustersLoadedMsg/namespacesLoadedMsg em model.go).
-func Run(c *client.Client, presetCluster, presetNamespace string) error {
-	p := tea.NewProgram(newModel(c, presetCluster, presetNamespace), tea.WithAltScreen())
+// Run inicia o programa da TUI. username/role só alimentam o header (barra
+// de contexto). presetCluster/presetNamespace, se não vazios, pulam direto
+// pra tela de pods assim que a respectiva lista carregar (ver
+// clustersLoadedMsg/namespacesLoadedMsg em model.go).
+func Run(c *client.Client, username, role, presetCluster, presetNamespace string) error {
+	p := tea.NewProgram(newModel(c, username, role, presetCluster, presetNamespace), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
