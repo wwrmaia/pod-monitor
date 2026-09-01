@@ -4,11 +4,12 @@ Cliente de terminal pra API REST do Pod Monitor. Fala com o mesmo backend
 usado pelo dashboard web — mesma autenticação, mesmo RBAC (`reader`/`admin`/`dev`),
 mesmos dados.
 
-Este é o **nível 1** do roadmap de CLI do projeto: um wrapper fino sobre a API
-já existente, focado em leitura. Uma TUI interativa (navegação ao vivo, estilo
-`k9s`) é a evolução planejada pra depois — ver `internal/client` e
-`internal/config`, que já estão isolados da camada de apresentação (`cmd/`)
-justamente pra serem reaproveitados sem mudança quando essa TUI vier.
+O **nível 1** do roadmap de CLI é um wrapper fino sobre a API já existente,
+focado em leitura (subcomandos abaixo). O **nível 2** é `podmon tui`, um
+painel interativo estilo `k9s` (navegação ao vivo, atualização automática) —
+ver seção [TUI](#tui-podmon-tui) abaixo. Os dois reaproveitam o mesmo
+`internal/client`/`internal/config`, isolados da camada de apresentação
+(`cmd/`/`internal/tui`) desde o início.
 
 Pra instalar binários pré-compilados (Linux/macOS/Windows) sem precisar do Go,
 ver [`INSTALL.md`](./INSTALL.md).
@@ -60,10 +61,45 @@ podmon --output json costs --cluster prod-eks | jq '.items[] | select(.cost_mont
 | `analysis` | Análise | roda a varredura de segurança/confiabilidade/boas práticas sob demanda |
 | `logs <pod>` | Logs | **snapshot único, não é streaming** — ver limitação abaixo |
 | `events` | (SSE interno) | tail ao vivo de todos os eventos do backend |
+| `tui` | — | painel interativo, ver seção [TUI](#tui-podmon-tui) |
 
 Fora do escopo desta v1 (operações de admin/escrita — ver plano de implementação):
 webhooks, thresholds, usuários/grupos, cadastro/remoção de cluster, hosts
 Docker/Podman, Helm releases, deployments, topologia.
+
+## TUI (`podmon tui`)
+
+Painel interativo (Bubble Tea) que fica rodando e se atualiza sozinho, em vez
+de um comando por chamada:
+
+```bash
+podmon tui                                    # abre no seletor de clusters
+podmon tui --cluster local --namespace pod-monitor   # pula direto pra tabela de pods
+```
+
+Fluxo principal: clusters → namespaces → tabela de pods/containers (com uso
+de CPU/mem e severidade aproximada). De qualquer uma dessas três telas, uma
+tecla global abre uma tela cheia com outro recurso — `esc` volta pra onde
+você estava:
+
+| Tecla | Abre |
+|---|---|
+| `d` | Dashboard/alertas (dados autoritativos, iguais ao `podmon dashboard`) |
+| `n` | Nodes |
+| `s` | Storage (PVCs) |
+| `u` | Quotas |
+| `o` | Auditoria (recursos órfãos) |
+| `p` | Custos |
+| `t` | Certificados TLS |
+
+Na tabela de pods: `/` filtra por nome, `c` cicla ordenação (nome/CPU%/MEM%).
+Em qualquer tela: `r` força atualização, `q`/`Ctrl+C` sai.
+
+Atualização automática: a tabela de pods e o dashboard pollam sozinhos
+(8s/10s) enquanto abertos, mais um empurrão extra via SSE quando algo muda no
+backend. As seis telas de recurso (nodes/storage/quotas/orphans/custos/certs)
+buscam ao abrir e com `r` manual — mudam devagar o bastante pra não precisar
+de polling automático.
 
 ## Limitação conhecida: `podmon logs` não segue (`-f`)
 

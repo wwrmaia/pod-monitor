@@ -175,6 +175,6 @@ podmon-windows-amd64.exe 2897516878a3a7dddd300a4167cff43db4dcf32408ed29b06464103
 
 ---
 
-podmon é o nível 1 de um roadmap maior — uma TUI interativa (navegação ao
-vivo, estilo `k9s`) é a evolução planejada. Ver também `cli/README.md` e
-`docs/documentacao-completa.md` (seção 31).
+Além dos comandos nível 1 acima, `podmon tui` é um painel interativo estilo
+`k9s` (navegação ao vivo, atualização automática) — ver a seção TUI em
+`cli/README.md` e `docs/documentacao-completa.md` (seção 31).

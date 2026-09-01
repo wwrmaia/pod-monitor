@@ -2289,7 +2289,7 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 ### v0.9.1 — 2026-08-28
 
 #### Novas funcionalidades
-- **CLI (`podmon`), nível 1 do roadmap de CLI** — cliente de terminal em Go (`cli/`, módulo próprio) que fala com a mesma API REST do dashboard web: `login`/`logout` (com fluxo de MFA), `clusters`, `namespaces`, `resources`, `nodes`, `top`, `costs`, `certs`, `storage`, `quotas`, `orphans`, `analysis`, `logs`, `dashboard`, `events` (tail ao vivo via SSE). Saída em tabela por padrão, `--output json` pra scripting. Ver [seção 31](#31-cli-podmon) e `cli/README.md`. Operações de admin/escrita (webhooks, thresholds, usuários, etc.) ficam fora do escopo desta v1, de propósito — ver `cli/README.md`.
+- **CLI (`podmon`)** — cliente de terminal em Go (`cli/`, módulo próprio) que fala com a mesma API REST do dashboard web. Nível 1: um comando por chamada (`login`/`logout` com MFA, `clusters`, `namespaces`, `resources`, `nodes`, `top`, `costs`, `certs`, `storage`, `quotas`, `orphans`, `analysis`, `logs`, `dashboard`, `events` via SSE), saída em tabela ou `--output json`. Nível 2: `podmon tui`, painel interativo estilo k9s que fica rodando e se atualiza sozinho. Ver [seção 31](#31-cli-podmon) e `cli/README.md`. Operações de admin/escrita (webhooks, thresholds, usuários, etc.) ficam fora de escopo, de propósito — ver `cli/README.md`.
 
 #### Correções
 - **SSE quebrado desde a v0.8.0** — o wrapper de métricas HTTP (`withMetrics`, adicionado na v0.8.0) envolve o `http.ResponseWriter` num tipo próprio (`statusWriter`) que não repassava `http.Flusher`. Qualquer handler que dependa de streaming (`GET /api/sse/events`) parava de funcionar atrás desse wrapper — o "Live" da Topologia e a atualização automática do Dashboard via SSE ficaram silenciosamente quebrados em produção por várias horas até serem pegos pelo teste da CLI. Corrigido repassando `Flush()` pro `ResponseWriter` real.
@@ -2539,21 +2539,26 @@ Nenhuma mudança — usa a mesma permissão de `get`/`list` em `pods` já conced
 
 Cliente de terminal (`cli/`, módulo Go próprio — `pod-monitor/cli`) que fala com a mesma API REST usada pelo dashboard web: mesma autenticação (login + MFA), mesmo RBAC (`reader`/`admin`/`dev`), mesmos endpoints de leitura já documentados na seção 5.
 
-### Arquitetura pensada pra evoluir pra TUI depois
+### Arquitetura — nível 1 (wrapper) e nível 2 (TUI) compartilham a mesma base
 
 ```
 cli/
-  cmd/            # comandos Cobra — camada de apresentação
+  cmd/              # comandos Cobra — camada de apresentação nível 1
+  internal/tui/     # painel interativo Bubble Tea — camada de apresentação nível 2
   internal/client/  # HTTP client + auth + parser de SSE, sem saber nada de terminal
   internal/config/  # ~/.config/pod-monitor-cli/config.yaml (token, 0600)
-  internal/output/  # tabela (tabwriter) e JSON
+  internal/output/  # tabela (tabwriter) e JSON, usado só pelo nível 1
 ```
 
-`internal/client`/`internal/config` são deliberadamente isolados de `cmd/`/`internal/output` — uma futura TUI interativa (nível 2 do roadmap, ainda não iniciada) reaproveita os dois primeiros por inteiro, só troca a camada de apresentação.
+`internal/client`/`internal/config` são deliberadamente isolados de `cmd/`/`internal/output` — o nível 2 (`internal/tui`) reaproveita os dois primeiros por inteiro, só troca a camada de apresentação, exatamente como planejado antes de existir.
 
-### Comandos (v1 — só leitura)
+### Comandos nível 1 (só leitura, um comando por chamada)
 
 `login`, `logout`, `clusters`, `namespaces`, `resources`, `nodes`, `top`, `costs`, `certs`, `storage`, `quotas`, `orphans`, `analysis`, `logs`, `dashboard`, `events`. Referência completa e exemplos em `cli/README.md`.
+
+### Nível 2 — `podmon tui`
+
+*Adicionado em 2026-09-01.* Painel interativo (Bubble Tea + Bubbles + Lip Gloss) que fica rodando e se atualiza sozinho — fluxo clusters → namespaces → tabela de pods (filtro/ordenação, severidade aproximada), mais sete telas cheias abertas por tecla global a partir de qualquer uma das três (`esc` volta): dashboard/alertas (`d`, dados autoritativos), nodes (`n`), storage (`s`), quotas (`u`), órfãos (`o`), custos (`p`), certificados TLS (`t`). Pods/dashboard pollam automaticamente (8s/10s) mais um SSE-driven refresh extra; as seis telas de recurso buscam ao abrir + `r` manual, sem polling automático (mudam devagar demais pra justificar). Detalhes e tabela de teclas em `cli/README.md`.
 
 ### Limitações conhecidas
 
