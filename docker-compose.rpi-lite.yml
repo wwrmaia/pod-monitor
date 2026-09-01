@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Monitor — Plano B leve para Raspberry Pi 3 (arm64, 1GB RAM)
+#
+# Igual ao docker-compose.hub.yml, mas com build local em vez de puxar as
+# imagens do Docker Hub (que hoje só publicam manifest amd64). Não sobe k3s
+# nem registry local — só postgres + backend + frontend. Use este arquivo se
+# o docker-compose.yml + docker-compose.rpi.yml (k3s embutido) pesar demais
+# para o Pi 3.
+#
+# Clusters Kubernetes a monitorar são adicionados depois, pela interface de
+# administração (não precisa montar kubeconfig aqui).
+#
+# Uso:
+#   docker compose -f docker-compose.rpi-lite.yml up -d --build
+#
+# Acesso:
+#   http://localhost:3000
+#
+# Variáveis de ambiente opcionais (arquivo .env na mesma pasta):
+#   JWT_SECRET=sua_chave_secreta          # padrão: valor fixo, troque em produção
+#   POSTGRES_PASSWORD=sua_senha
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pod-monitor-postgres
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-podmonitor}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_DB=${POSTGRES_DB:-podmonitor}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-podmonitor}", "-d", "${POSTGRES_DB:-podmonitor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  backend:
+    build: ./backend
+    container_name: pod-monitor-backend
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:-podmonitor}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-podmonitor}?sslmode=disable
+      - JWT_SECRET=${JWT_SECRET:-pod-monitor-secret-change-me}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
+    volumes:
+      - backend-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build: ./frontend
+    container_name: pod-monitor-frontend
+    restart: unless-stopped
+    mem_limit: 128m
+    ports:
+      - "3000:80"
+    environment:
+      - BACKEND_HOST=backend
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  backend-data:

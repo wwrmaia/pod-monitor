@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pod Monitor — override para Raspberry Pi 3 (arm64, 1GB RAM)
+#
+# Não substitui docker-compose.yml — é aplicado em cima dele. As imagens
+# base (golang-alpine, node-alpine, nginx-alpine, rancher/k3s, registry:2)
+# já publicam manifests arm64, então o build/deploy funciona nativamente,
+# sem precisar de imagens ou flags específicas de arquitetura.
+#
+# O que este override ajusta (específico do hardware, não da arquitetura):
+#   - k3s: mais tempo de tolerância no healthcheck (CPU/SD card do Pi 3
+#     são bem mais lentos que uma máquina dev; o primeiro boot do k3s pode
+#     passar do timeout padrão de ~6min)
+#   - registry: limite de memória, por ser o serviço menos crítico a conter
+#
+# Pré-requisito recomendado: aumentar o swap do Pi para pelo menos 1GB
+# (Raspberry Pi OS usa dphys-swapfile por padrão):
+#   sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=1024/' /etc/dphys-swapfile
+#   sudo systemctl restart dphys-swapfile
+#
+# Uso:
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.rpi.yml
+#   ./deploy.sh
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  registry:
+    mem_limit: 128m
+
+  k3s:
+    healthcheck:
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 60s
