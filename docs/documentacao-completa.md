@@ -2286,6 +2286,16 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 27. Changelog
 
+### v0.9.2 — 2026-09-03
+
+#### Novas funcionalidades
+- **Notas por namespace** — janela flutuante (não-modal, `position: fixed`) acessível pelo botão "📝 Notas" ao lado do seletor de namespace na aba Monitor. Nota única por cluster+namespace (estilo wiki, mostra "editado por X em data"), pensada pra documentar o que roda em cada namespace (sistema, responsável, contatos). Persistida em Postgres (`GET/POST /api/namespace-notes`, tabela `namespace_notes`), degrada graciosamente sem `DATABASE_URL`.
+- **Ícones por tipo de recurso na Topologia** — os 12 tipos de nó do grafo (Pod, Deployment, Service, StatefulSet, DaemonSet, ReplicaSet, ConfigMap, Secret, HPA, Job, CronJob, Ingress) ganharam um glifo SVG próprio dentro do círculo, no estilo KubeView, em vez de só cor+texto. Reaproveitado na legenda e no painel de detalhes do nó selecionado.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.9.2`, `wwrmaia/pod-monitor-frontend:0.9.2`
+- Helm chart: `version: 0.9.2`, `appVersion: "0.9.2"`
+
 ### v0.9.1 — 2026-08-28
 
 #### Novas funcionalidades
