@@ -2965,6 +2965,43 @@ export default function App() {
   const [loading,    setLoading]    = useState(false)
   const [error,      setError]      = useState('')
 
+  // notas por namespace (janela flutuante)
+  const [nsNoteOpen,    setNsNoteOpen]    = useState(false)
+  const [nsNoteText,    setNsNoteText]    = useState('')
+  const [nsNoteMeta,    setNsNoteMeta]    = useState(null)
+  const [nsNoteEnabled, setNsNoteEnabled] = useState(true)
+  const [nsNoteLoading, setNsNoteLoading] = useState(false)
+  const [nsNoteSaving,  setNsNoteSaving]  = useState(false)
+  const [nsNoteDirty,   setNsNoteDirty]   = useState(false)
+
+  function openNsNote() {
+    if (!namespace) return
+    setNsNoteOpen(true)
+    setNsNoteLoading(true)
+    axios.get('/api/namespace-notes', { params: { cluster, namespace } })
+      .then(({ data }) => {
+        setNsNoteEnabled(data.enabled !== false)
+        setNsNoteText(data.note?.note || '')
+        setNsNoteMeta(data.note?.updated_by ? { updated_by: data.note.updated_by, updated_at: data.note.updated_at } : null)
+        setNsNoteDirty(false)
+      })
+      .catch(() => setNsNoteEnabled(false))
+      .finally(() => setNsNoteLoading(false))
+  }
+
+  function saveNsNote() {
+    setNsNoteSaving(true)
+    axios.post('/api/namespace-notes', { cluster, namespace, note: nsNoteText })
+      .then(({ data }) => {
+        setNsNoteMeta(data.note?.updated_by ? { updated_by: data.note.updated_by, updated_at: data.note.updated_at } : null)
+        setNsNoteDirty(false)
+      })
+      .finally(() => setNsNoteSaving(false))
+  }
+
+  // troca de namespace/cluster invalida a nota carregada — fecha a janela
+  useEffect(() => { setNsNoteOpen(false) }, [namespace, cluster])
+
   // histórico
   const [history,    setHistory]    = useState([])
   const [histNs,     setHistNs]     = useState('')
@@ -3993,7 +4030,47 @@ export default function App() {
                 <option value='alerts'>{t('onlyAlertsOpt')}</option>
               </select>
               <button onClick={fetchPods} disabled={loading}>{loading ? t('consultingBtn') : t('refreshBtn')}</button>
+              <button onClick={openNsNote} disabled={!namespace}
+                title={namespace ? t('nsNoteTooltip') : t('nsNoteTooltipDisabled')}>
+                📝 {t('nsNoteBtn')}
+              </button>
             </div>
+
+            {nsNoteOpen && (
+              <div className='ns-note-float'>
+                <div className='modal-header'>
+                  <span>📝 {namespace} <span style={{ opacity: 0.6, fontWeight: 400 }}>({cluster})</span></span>
+                  <button className='modal-close' onClick={() => setNsNoteOpen(false)}>✕</button>
+                </div>
+                <div className='ns-note-body'>
+                  {nsNoteLoading ? (
+                    <div className='empty'>{t('loadingData')}</div>
+                  ) : !nsNoteEnabled ? (
+                    <div className='error-box'>{t('nsNoteDisabled')}</div>
+                  ) : (
+                    <>
+                      <textarea
+                        className='ns-note-textarea'
+                        value={nsNoteText}
+                        onChange={e => { setNsNoteText(e.target.value); setNsNoteDirty(true) }}
+                        placeholder={t('nsNotePlaceholder')}
+                      />
+                      <div className='ns-note-meta'>
+                        {nsNoteMeta ? t('nsNoteUpdatedBy')(nsNoteMeta.updated_by, nsNoteMeta.updated_at) : t('nsNoteNeverEdited')}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {nsNoteEnabled && !nsNoteLoading && (
+                  <div className='modal-footer'>
+                    <button onClick={() => setNsNoteOpen(false)}>{t('cancel')}</button>
+                    <button onClick={saveNsNote} disabled={nsNoteSaving || !nsNoteDirty}>
+                      {nsNoteSaving ? t('saving') : t('save')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {error && <div className='error-box'>{error}</div>}
             {pods.length > 0 && (
               <div className='metrics'>

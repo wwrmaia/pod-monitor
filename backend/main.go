@@ -2569,6 +2569,15 @@ func connectDB(dsn string) bool {
 			sent_at   TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 			UNIQUE(cluster, namespace, pod, container, kind)
 		)`,
+		`CREATE TABLE IF NOT EXISTS namespace_notes (
+			id         BIGSERIAL PRIMARY KEY,
+			cluster    TEXT NOT NULL DEFAULT '',
+			namespace  TEXT NOT NULL,
+			note       TEXT NOT NULL DEFAULT '',
+			updated_by TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			UNIQUE(cluster, namespace)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err = conn.Exec(s); err != nil {
@@ -5737,6 +5746,75 @@ func handleCostConfigRouter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── Notas por namespace ─────────────────────────────────────────────────────
+
+type NamespaceNote struct {
+	Cluster   string `json:"cluster"`
+	Namespace string `json:"namespace"`
+	Note      string `json:"note"`
+	UpdatedBy string `json:"updated_by"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// handleNamespaceNotesRouter guarda uma anotação livre por cluster+namespace
+// (ex.: "aqui roda o sistema de faturamento, contato: time-X") — persistência
+// opcional via Postgres, mesmo padrão de cost_config.
+func handleNamespaceNotesRouter(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsCtxKey).(*TokenClaims)
+	switch r.Method {
+	case http.MethodGet:
+		clusterName := r.URL.Query().Get("cluster")
+		if claims != nil && !devAllowedCluster(claims, clusterName) {
+			http.Error(w, "Forbidden", 403); return
+		}
+		ns := r.URL.Query().Get("namespace")
+		if ns == "" { http.Error(w, "namespace obrigatório", 400); return }
+		if claims != nil && !devAllowedNamespace(claims, ns) {
+			http.Error(w, "Forbidden", 403); return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if db == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"enabled": false})
+			return
+		}
+		note := NamespaceNote{Cluster: clusterName, Namespace: ns}
+		err := db.QueryRow(`SELECT note, updated_by, updated_at FROM namespace_notes WHERE cluster=$1 AND namespace=$2`,
+			clusterName, ns).Scan(&note.Note, &note.UpdatedBy, &note.UpdatedAt)
+		if err != nil && err != sql.ErrNoRows {
+			http.Error(w, err.Error(), 500); return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"enabled": true, "note": note})
+	case http.MethodPost:
+		if db == nil { http.Error(w, "banco não configurado", 400); return }
+		var body NamespaceNote
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "payload inválido", 400); return
+		}
+		if body.Namespace == "" { http.Error(w, "namespace obrigatório", 400); return }
+		if claims != nil && !devAllowedCluster(claims, body.Cluster) {
+			http.Error(w, "Forbidden", 403); return
+		}
+		if claims != nil && !devAllowedNamespace(claims, body.Namespace) {
+			http.Error(w, "Forbidden", 403); return
+		}
+		if claims != nil { body.UpdatedBy = claims.Username }
+		_, err := db.Exec(`INSERT INTO namespace_notes (cluster, namespace, note, updated_by, updated_at)
+			VALUES ($1,$2,$3,$4, to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+			ON CONFLICT(cluster, namespace) DO UPDATE SET note=EXCLUDED.note, updated_by=EXCLUDED.updated_by,
+			updated_at=EXCLUDED.updated_at`,
+			body.Cluster, body.Namespace, body.Note, body.UpdatedBy)
+		if err != nil { http.Error(w, err.Error(), 500); return }
+		if claims != nil {
+			auditLog(claims.Username, claims.Role, "namespace_note_save",
+				fmt.Sprintf("cluster=%s namespace=%s", body.Cluster, body.Namespace), r.RemoteAddr)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"enabled": true, "note": body})
+	default:
+		http.Error(w, "Method Not Allowed", 405)
+	}
+}
+
 // ── Topology ──────────────────────────────────────────────────────────────────
 
 func handleTopology(w http.ResponseWriter, r *http.Request) {
@@ -6481,6 +6559,7 @@ func main() {
 	register("/api/thresholds",        adminOnly(handleThresholdsRouter))
 	register("/api/costs",              readerOrAdminOnly(handleCosts))
 	register("/api/admin/cost-config",  adminOnly(handleCostConfigRouter))
+	register("/api/namespace-notes",    authMiddleware(handleNamespaceNotesRouter))
 	register("/api/webhooks",          adminOnly(handleWebhooksRouter))
 	register("/api/webhooks/test",     adminOnly(handleWebhookTest))
 	register("/api/sse/events",        authMiddleware(handleSSE))
