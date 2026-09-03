@@ -2452,6 +2452,110 @@ const EDGE_COLORS = {
   connects: '#ef4444',
 }
 
+// Glifos desenhados em um viewBox 24x24 (-12..12), escalados via <g scale>
+// para caber no nó — vector-effect mantém a espessura do traço nítida em
+// qualquer zoom/escala. Um glifo por kind, para reconhecimento visual
+// imediato do tipo de recurso (estilo KubeView) em vez de só cor+texto.
+function NodeIcon({ kind, r, color }) {
+  const s = (r * 0.78) / 12
+  const p = { fill: 'none', stroke: color, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', vectorEffect: 'non-scaling-stroke' }
+  const fp = { fill: color, stroke: 'none' }
+  let glyph
+  switch (kind) {
+    case 'Pod':
+      glyph = (<>
+        <circle cx={0} cy={-5} r={2.4} {...fp} />
+        <circle cx={-5.2} cy={4} r={2.4} {...fp} />
+        <circle cx={5.2} cy={4} r={2.4} {...fp} />
+      </>)
+      break
+    case 'Deployment':
+      glyph = (<>
+        <rect x={-8} y={-8} width={16} height={4.5} rx={1} {...p} opacity={0.55} />
+        <rect x={-8} y={-1.2} width={16} height={4.5} rx={1} {...p} opacity={0.8} />
+        <rect x={-8} y={5.6} width={16} height={4.5} rx={1} {...p} />
+      </>)
+      break
+    case 'ReplicaSet':
+      glyph = (<>
+        <rect x={-9} y={-6.5} width={12} height={12} rx={1.5} {...p} opacity={0.5} />
+        <rect x={-3} y={-6.5} width={12} height={12} rx={1.5} {...p} />
+      </>)
+      break
+    case 'StatefulSet':
+      glyph = (<>
+        <ellipse cx={0} cy={-6} rx={8} ry={3} {...p} />
+        <path d='M -8 -6 L -8 6 A 8 3 0 0 0 8 6 L 8 -6' {...p} />
+        <path d='M -8 0 A 8 3 0 0 0 8 0' {...p} opacity={0.6} />
+      </>)
+      break
+    case 'DaemonSet':
+      glyph = (<>
+        <rect x={-9} y={-9} width={7} height={7} rx={1} {...p} />
+        <rect x={2} y={-9} width={7} height={7} rx={1} {...p} />
+        <rect x={-9} y={2} width={7} height={7} rx={1} {...p} />
+        <rect x={2} y={2} width={7} height={7} rx={1} {...p} />
+      </>)
+      break
+    case 'Service':
+      glyph = (<>
+        <line x1={0} y1={0} x2={0} y2={-9} {...p} />
+        <line x1={0} y1={0} x2={7.8} y2={5} {...p} />
+        <line x1={0} y1={0} x2={-7.8} y2={5} {...p} />
+        <circle cx={0} cy={0} r={2.4} {...fp} />
+        <circle cx={0} cy={-9} r={1.8} {...fp} />
+        <circle cx={7.8} cy={5} r={1.8} {...fp} />
+        <circle cx={-7.8} cy={5} r={1.8} {...fp} />
+      </>)
+      break
+    case 'Ingress':
+      glyph = (<>
+        <line x1={-3} y1={-9} x2={-3} y2={9} {...p} />
+        <path d='M -3 0 L 6 0' {...p} />
+        <path d='M 2 -4 L 6 0 L 2 4' {...p} />
+      </>)
+      break
+    case 'ConfigMap':
+      glyph = (<>
+        <rect x={-7} y={-9} width={14} height={18} rx={1.5} {...p} />
+        <line x1={-4} y1={-4} x2={4} y2={-4} {...p} />
+        <line x1={-4} y1={0} x2={4} y2={0} {...p} />
+        <line x1={-4} y1={4} x2={4} y2={4} {...p} />
+      </>)
+      break
+    case 'Secret':
+      glyph = (<>
+        <path d='M -5 -2 L -5 -6 A 5 5 0 0 1 5 -6 L 5 -2' {...p} />
+        <rect x={-7} y={-2} width={14} height={11} rx={1.5} {...p} />
+        <circle cx={0} cy={3} r={1.4} {...fp} />
+      </>)
+      break
+    case 'HPA':
+      glyph = (<>
+        <path d='M 0 -9 L -3.5 -4 M 0 -9 L 3.5 -4' {...p} />
+        <line x1={0} y1={-9} x2={0} y2={9} {...p} />
+        <path d='M 0 9 L -3.5 4 M 0 9 L 3.5 4' {...p} />
+      </>)
+      break
+    case 'Job':
+      glyph = (<>
+        <rect x={-8} y={-8} width={16} height={16} rx={2} {...p} />
+        <path d='M -4 0 L -1 3.5 L 4.5 -3.5' {...p} />
+      </>)
+      break
+    case 'CronJob':
+      glyph = (<>
+        <circle cx={0} cy={0} r={9} {...p} />
+        <line x1={0} y1={0} x2={0} y2={-5} {...p} />
+        <line x1={0} y1={0} x2={3.5} y2={2} {...p} />
+      </>)
+      break
+    default:
+      return null
+  }
+  return <g transform={`scale(${s})`}>{glyph}</g>
+}
+
 function escapeXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
@@ -2616,7 +2720,7 @@ function TopoGraph({ nodes, edges, lang }) {
         .force('link', forceLink(simLinks).id(d => d.id).distance(110).strength(0.4))
         .force('charge', forceManyBody().strength(-350))
         .force('center', forceCenter(0, 0))
-        .force('collide', forceCollide(d => d.r + 18))
+        .force('collide', forceCollide(d => d.r + 26))
         .stop()
         .tick(300)
       const pos = {}
@@ -2732,9 +2836,10 @@ function TopoGraph({ nodes, edges, lang }) {
                 <circle r={r} fill={color} fillOpacity={0.2}
                   stroke={statusStroke} strokeWidth={isSelected ? 3 : 2}
                   filter={isSelected ? 'drop-shadow(0 0 6px rgba(255,255,255,0.4))' : undefined} />
+                <NodeIcon kind={n.kind} r={r} color={color} />
                 <text fontSize={9} fill='var(--text-1)' textAnchor='middle' dy={-r - 4}
                   style={{ pointerEvents: 'none', fontWeight: 600 }}>{shortName}</text>
-                <text fontSize={7} fill={color} textAnchor='middle' dy={3}
+                <text fontSize={7} fill={color} textAnchor='middle' dy={r + 10}
                   style={{ pointerEvents: 'none' }}>{n.kind}</text>
               </g>
             )
@@ -2779,7 +2884,10 @@ function TopoGraph({ nodes, edges, lang }) {
             return (
               <span key={kind} onClick={() => toggleKind(kind)} title={hidden ? t('topoShowKind') : t('topoHideKind')}
                 style={{ fontSize: 10, color: hidden ? 'var(--text-3)' : 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer', opacity: hidden ? 0.4 : 1, userSelect: 'none' }}>
-                <svg width={12} height={12}><circle cx={6} cy={6} r={5} fill={color} fillOpacity={hidden ? 0.1 : 0.3} stroke={color} strokeWidth={1.5} /></svg>
+                <svg width={14} height={14} viewBox='-7 -7 14 14'>
+                  <circle r={6} fill={color} fillOpacity={hidden ? 0.1 : 0.3} stroke={color} strokeWidth={1.3} />
+                  <NodeIcon kind={kind} r={6} color={color} />
+                </svg>
                 {kind}
               </span>
             )
@@ -2802,7 +2910,13 @@ function TopoGraph({ nodes, edges, lang }) {
       {/* Painel de detalhes */}
       {selNode && (
         <div style={{ position: 'absolute', top: 44, left: 8, background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px', minWidth: 180, maxWidth: 260, fontSize: 12 }}>
-          <div style={{ fontWeight: 700, color: NODE_COLORS[selNode.kind] || 'var(--text-1)', marginBottom: 4 }}>{selNode.kind}</div>
+          <div style={{ fontWeight: 700, color: NODE_COLORS[selNode.kind] || 'var(--text-1)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 5 }}>
+            <svg width={16} height={16} viewBox='-8 -8 16 16'>
+              <circle r={7} fill={NODE_COLORS[selNode.kind] || '#94a3b8'} fillOpacity={0.2} stroke={NODE_COLORS[selNode.kind] || '#94a3b8'} strokeWidth={1.3} />
+              <NodeIcon kind={selNode.kind} r={7} color={NODE_COLORS[selNode.kind] || '#94a3b8'} />
+            </svg>
+            {selNode.kind}
+          </div>
           <div style={{ color: 'var(--text-1)', wordBreak: 'break-all' }}>{selNode.name}</div>
           <div style={{ color: 'var(--text-3)', fontSize: 11, marginTop: 2 }}>{selNode.namespace}</div>
           {selNode.kind === 'HPA' && selNode.meta && (
