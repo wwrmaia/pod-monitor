@@ -2286,6 +2286,16 @@ A spec cobre todos os 40+ endpoints organizados em 11 tags:
 
 ## 27. Changelog
 
+### v0.9.3 — 2026-09-03
+
+#### Novas funcionalidades
+- **Arquivamento frio do Histórico** — antes de apagar snapshots expirados de `pod_snapshots`, o backend pode exportá-los como CSV comprimido (gzip) para um destino frio configurável por cluster: NFS (volume montado em `/mnt/pod-monitor-archive`), S3 ou Azure Blob Storage. Assinatura das requisições feita à mão (AWS SigV4 / Azure Shared Key, só `crypto/hmac` da stdlib), mesmo padrão sem SDK dos webhooks. Retenção (7/15/30 dias) e intervalo do ciclo de limpeza (6h/12h) deixam de ser fixos e passam a ser configuráveis pelo Admin (`archive_config`, mesmo padrão per-cluster-com-fallback-global de `cost_config`). Endpoints `GET/POST /api/admin/archive-config`, `POST /api/admin/archive-config/test`, `POST /api/admin/archive-config/run-now`. UI: seção "Retenção e Arquivamento do Histórico" no Admin.
+- Adiciona `backend/archive_verify_test.go` — primeiro teste automatizado do projeto, valida as duas assinaturas hand-rolled fim a fim contra emuladores locais (MinIO/Azurite); pulado por padrão a menos que `MINIO_ENDPOINT`/`AZURITE_ENDPOINT` estejam setados.
+
+#### Infraestrutura
+- Imagens Docker Hub: `wwrmaia/pod-monitor-backend:0.9.3`, `wwrmaia/pod-monitor-frontend:0.9.3`
+- Helm chart: `version: 0.9.3`, `appVersion: "0.9.3"` — novos valores `backend.archiveNFS.*` (server/path do volume NFS)
+
 ### v0.9.2 — 2026-09-03
 
 #### Novas funcionalidades
