@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2578,6 +2580,17 @@ func connectDB(dsn string) bool {
 			updated_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 			UNIQUE(cluster, namespace)
 		)`,
+		// cluster='' é o default global. cleanup_interval_hours só é lido dessa
+		// linha global — não faz sentido por cluster já que o loop é único.
+		`CREATE TABLE IF NOT EXISTS archive_config (
+			id                     BIGSERIAL PRIMARY KEY,
+			cluster                TEXT NOT NULL DEFAULT '',
+			retention_days         INTEGER NOT NULL DEFAULT 7,
+			cleanup_interval_hours INTEGER NOT NULL DEFAULT 6,
+			backend_type           TEXT NOT NULL DEFAULT 'none',
+			config                 TEXT NOT NULL DEFAULT '{}',
+			UNIQUE(cluster)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err = conn.Exec(s); err != nil {
@@ -2591,16 +2604,390 @@ func connectDB(dsn string) bool {
 	return true
 }
 
+// cleanupLoop relê o intervalo configurado a cada iteração (em vez de um
+// time.Ticker fixo), pra uma mudança feita no Admin valer a partir do
+// próximo ciclo sem precisar reiniciar o backend.
 func cleanupLoop() {
-	ticker := time.NewTicker(6 * time.Hour)
-	for range ticker.C {
-		if db == nil { continue }
-		cutoff := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
-		res, err := db.Exec("DELETE FROM pod_snapshots WHERE captured_at < $1", cutoff)
-		if err == nil {
-			if n, _ := res.RowsAffected(); n > 0 { log.Printf("Limpeza: %d snapshots removidos", n) }
+	for {
+		time.Sleep(getGlobalCleanupInterval())
+		runCleanupCycle()
+	}
+}
+
+// runCleanupCycle apaga snapshots expirados, um cluster por vez — cada
+// cluster pode ter sua própria retenção e seu próprio destino de
+// arquivamento (ArchiveConfig). Usa SELECT DISTINCT cluster em vez da lista
+// de clusters atualmente registrados pra também dar conta de limpar
+// snapshots de um cluster que já foi removido do monitoramento.
+func runCleanupCycle() {
+	if db == nil { return }
+	rows, err := db.Query(`SELECT DISTINCT cluster FROM pod_snapshots`)
+	if err != nil { return }
+	var clusters []string
+	for rows.Next() {
+		var c string
+		if rows.Scan(&c) == nil { clusters = append(clusters, c) }
+	}
+	rows.Close()
+	for _, cluster := range clusters {
+		cleanupCluster(cluster)
+	}
+}
+
+// cleanupCluster processa um cluster: arquiva (se configurado) e só apaga o
+// que foi arquivado com sucesso — em caso de falha, a linha permanece e
+// tenta de novo no próximo ciclo, evitando perda silenciosa de dados.
+func cleanupCluster(cluster string) {
+	cfg := getArchiveConfig(cluster)
+	cutoff := time.Now().Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour).UTC().Format(time.RFC3339)
+
+	const pageSize = 5000
+	for {
+		expRows, err := queryExpiredSnapshots(cluster, cutoff, pageSize)
+		if err != nil || len(expRows) == 0 { return }
+
+		if cfg.BackendType != "none" {
+			if err := archiveSnapshots(cfg, cluster, expRows); err != nil {
+				log.Printf("Arquivamento de histórico falhou (cluster=%s, backend=%s): %v — mantendo linhas pra tentar de novo", cluster, cfg.BackendType, err)
+				return
+			}
+		}
+
+		ids := make([]interface{}, len(expRows))
+		placeholders := make([]string, len(expRows))
+		for i, rec := range expRows {
+			ids[i] = rec.id
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		res, err := db.Exec(`DELETE FROM pod_snapshots WHERE id IN (`+strings.Join(placeholders, ",")+`)`, ids...)
+		if err != nil { return }
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("Limpeza: %d snapshots removidos (cluster=%s)", n, cluster)
+		}
+		if len(expRows) < pageSize { return }
+	}
+}
+
+// snapshotRow é o HistoryRecord + id (precisa do id pra apagar com precisão
+// depois de arquivar, sem depender de captured_at bater exatamente).
+type snapshotRow struct {
+	id int64
+	HistoryRecord
+}
+
+func queryExpiredSnapshots(cluster, cutoff string, limit int) ([]snapshotRow, error) {
+	rows, err := db.Query(`SELECT id,session_id,captured_at,cluster,namespace,pod,node,container,
+		cpu_request,cpu_limit,mem_request,mem_limit,cpu_usage,mem_usage
+		FROM pod_snapshots WHERE cluster=$1 AND captured_at < $2 ORDER BY captured_at LIMIT $3`,
+		cluster, cutoff, limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var out []snapshotRow
+	for rows.Next() {
+		var rec snapshotRow
+		if err := rows.Scan(&rec.id, &rec.SessionID, &rec.CapturedAt, &rec.Cluster, &rec.Namespace, &rec.Pod, &rec.Node, &rec.Container,
+			&rec.CPURequest, &rec.CPULimit, &rec.MemoryRequest, &rec.MemoryLimit, &rec.CPUUsage, &rec.MemoryUsage); err == nil {
+			out = append(out, rec)
 		}
 	}
+	return out, nil
+}
+
+// ── Arquivamento frio de histórico (NFS / S3 / Azure Blob) ────────────────────
+
+type ArchiveConfig struct {
+	Cluster       string            `json:"cluster"`
+	RetentionDays int               `json:"retention_days"`
+	BackendType   string            `json:"backend_type"`
+	Config        map[string]string `json:"config"`
+}
+
+// archiveSensitiveFields são as chaves de Config que nunca voltam em texto
+// puro pro frontend — mesmo mecanismo de whSensitiveFields/whMaskPlaceholder
+// já usado pelos webhooks (main.go, seção "── Webhooks ──").
+var archiveSensitiveFields = map[string]bool{"secret_access_key": true, "account_key": true}
+
+func maskArchiveConfig(cfgJSON string) json.RawMessage {
+	m := normalizeWHConfig(json.RawMessage(cfgJSON))
+	for k := range archiveSensitiveFields {
+		if m[k] != "" { m[k] = whMaskPlaceholder }
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+func mergeArchiveSecrets(existingJSON string, incoming map[string]string) map[string]string {
+	existing := normalizeWHConfig(json.RawMessage(existingJSON))
+	for k := range archiveSensitiveFields {
+		if incoming[k] == whMaskPlaceholder { incoming[k] = existing[k] }
+	}
+	return incoming
+}
+
+// getArchiveConfig tenta a config específica do cluster, depois o default
+// global (cluster='') — mesmo padrão de getCostConfig.
+func getArchiveConfig(cluster string) ArchiveConfig {
+	cfg := ArchiveConfig{Cluster: cluster, RetentionDays: 7, BackendType: "none", Config: map[string]string{}}
+	if db == nil { return cfg }
+	for _, c := range []string{cluster, ""} {
+		var retentionDays int
+		var backendType, cfgJSON string
+		err := db.QueryRow(`SELECT retention_days, backend_type, config FROM archive_config WHERE cluster=$1`, c).
+			Scan(&retentionDays, &backendType, &cfgJSON)
+		if err == nil {
+			cfg.RetentionDays, cfg.BackendType, cfg.Config = retentionDays, backendType, normalizeWHConfig(json.RawMessage(cfgJSON))
+			return cfg
+		}
+	}
+	return cfg
+}
+
+// getGlobalCleanupInterval só lê a linha cluster='' — o intervalo do loop de
+// limpeza é único pro processo inteiro, não faz sentido por cluster.
+func getGlobalCleanupInterval() time.Duration {
+	if db == nil { return 6 * time.Hour }
+	var hours int
+	if err := db.QueryRow(`SELECT cleanup_interval_hours FROM archive_config WHERE cluster=''`).Scan(&hours); err != nil || hours <= 0 {
+		return 6 * time.Hour
+	}
+	return time.Duration(hours) * time.Hour
+}
+
+// archiveSnapshots serializa as linhas em CSV+gzip (mesmas colunas de
+// handleHistoryCSV), agrupadas por dia calendário de captured_at, e grava
+// cada grupo como um objeto separado — pod-monitor-history/{cluster}/{dia}.csv.gz.
+func archiveSnapshots(cfg ArchiveConfig, cluster string, rows []snapshotRow) error {
+	byDay := map[string][]snapshotRow{}
+	for _, rec := range rows {
+		day := rec.CapturedAt
+		if len(day) >= 10 { day = day[:10] } // captured_at é RFC3339 — YYYY-MM-DD são os 10 primeiros chars
+		byDay[day] = append(byDay[day], rec)
+	}
+	archiver, err := newArchiver(cfg)
+	if err != nil { return err }
+	for day, dayRows := range byDay {
+		data, err := gzipCSV(dayRows)
+		if err != nil { return err }
+		key := fmt.Sprintf("pod-monitor-history/%s/%s.csv.gz", cluster, day)
+		if err := archiver.Save(context.Background(), key, data); err != nil {
+			return fmt.Errorf("dia %s: %w", day, err)
+		}
+	}
+	return nil
+}
+
+func gzipCSV(rows []snapshotRow) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	fmt.Fprintln(gw, "captured_at,cluster,namespace,pod,node,container,cpu_request,cpu_limit,cpu_usage,mem_request,mem_limit,mem_usage")
+	for _, rec := range rows {
+		fmt.Fprintf(gw, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+			rec.CapturedAt, rec.Cluster, rec.Namespace, rec.Pod, rec.Node, rec.Container,
+			rec.CPURequest, rec.CPULimit, rec.CPUUsage,
+			rec.MemoryRequest, rec.MemoryLimit, rec.MemoryUsage)
+	}
+	if err := gw.Close(); err != nil { return nil, err }
+	return buf.Bytes(), nil
+}
+
+// Archiver grava um objeto (chave + bytes) no destino frio configurado.
+type Archiver interface {
+	Save(ctx context.Context, key string, data []byte) error
+}
+
+func newArchiver(cfg ArchiveConfig) (Archiver, error) {
+	switch cfg.BackendType {
+	case "nfs":
+		path := cfg.Config["path"]
+		if path == "" { return nil, fmt.Errorf("nfs: path não configurado") }
+		return nfsArchiver{basePath: filepath.Join(nfsArchiveMountPath, path)}, nil
+	case "s3":
+		if cfg.Config["bucket"] == "" || cfg.Config["access_key_id"] == "" || cfg.Config["secret_access_key"] == "" {
+			return nil, fmt.Errorf("s3: bucket/access_key_id/secret_access_key obrigatórios")
+		}
+		return s3Archiver{
+			bucket: cfg.Config["bucket"], region: orDefault(cfg.Config["region"], "us-east-1"),
+			endpoint: cfg.Config["endpoint"], accessKey: cfg.Config["access_key_id"], secretKey: cfg.Config["secret_access_key"],
+		}, nil
+	case "azure_blob":
+		if cfg.Config["account_name"] == "" || cfg.Config["container"] == "" || cfg.Config["account_key"] == "" {
+			return nil, fmt.Errorf("azure_blob: account_name/container/account_key obrigatórios")
+		}
+		return azureBlobArchiver{
+			account: cfg.Config["account_name"], container: cfg.Config["container"],
+			accountKey: cfg.Config["account_key"], endpoint: cfg.Config["endpoint"],
+		}, nil
+	default:
+		return nil, fmt.Errorf("backend_type desconhecido: %s", cfg.BackendType)
+	}
+}
+
+func orDefault(v, def string) string {
+	if v == "" { return def }
+	return v
+}
+
+// nfsArchiveMountPath é onde o volume NFS (montado via Helm/manifest — ver
+// helm/pod-monitor/templates/backend.yaml, backend.archiveNFS.*) é esperado
+// dentro do pod. cfg.Config["path"] é só o subdiretório dentro dele.
+const nfsArchiveMountPath = "/mnt/pod-monitor-archive"
+
+type nfsArchiver struct{ basePath string }
+
+func (a nfsArchiver) Save(ctx context.Context, key string, data []byte) error {
+	full := filepath.Join(a.basePath, key)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil { return err }
+	return os.WriteFile(full, data, 0o644)
+}
+
+// escapeObjectKeyPath faz URL-escape de cada segmento de um caminho
+// separadamente e rejunta com "/" — url.PathEscape sozinho escaparia a
+// própria barra (%2F), quebrando tanto a URL de requisição quanto a
+// assinatura (que precisa refletir exatamente a URI enviada) pra uma chave
+// com subdiretórios como "pod-monitor-history/cluster/2026-09-03.csv.gz".
+func escapeObjectKeyPath(key string) string {
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// s3Archiver assina requisições PUT Object com AWS Signature Version 4 à
+// mão (sem SDK — mesmo espírito de sendHTTPOnce/telegramRequest/net-smtp
+// pros webhooks: stdlib apenas). endpoint vazio usa o S3 padrão da AWS;
+// customizável pra compatibilidade com serviços S3-compatible (MinIO etc.).
+type s3Archiver struct {
+	bucket, region, endpoint, accessKey, secretKey string
+}
+
+func (a s3Archiver) Save(ctx context.Context, key string, data []byte) error {
+	scheme := "https"
+	host := a.endpoint
+	if host == "" {
+		host = fmt.Sprintf("s3.%s.amazonaws.com", a.region)
+	} else if strings.HasPrefix(host, "http://") {
+		scheme = "http"
+	}
+	host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+	reqURL := fmt.Sprintf("%s://%s/%s/%s", scheme, host, a.bucket, escapeObjectKeyPath(key))
+
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	payloadHash := sha256Hex(data)
+
+	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n", host, payloadHash, amzDate)
+	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
+	canonicalRequest := strings.Join([]string{
+		"PUT", "/" + a.bucket + "/" + escapeObjectKeyPath(key), "",
+		canonicalHeaders, signedHeaders, payloadHash,
+	}, "\n")
+
+	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", dateStamp, a.region)
+	stringToSign := strings.Join([]string{
+		"AWS4-HMAC-SHA256", amzDate, credentialScope, sha256Hex([]byte(canonicalRequest)),
+	}, "\n")
+
+	signingKey := hmacSHA256(hmacSHA256(hmacSHA256(hmacSHA256([]byte("AWS4"+a.secretKey), dateStamp), a.region), "s3"), "aws4_request")
+	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
+
+	authHeader := fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		a.accessKey, credentialScope, signedHeaders, signature)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data))
+	if err != nil { return err }
+	req.Header.Set("x-amz-content-sha256", payloadHash)
+	req.Header.Set("x-amz-date", amzDate)
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Length", strconv.Itoa(len(data)))
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("s3 PUT %s: status %d", key, resp.StatusCode)
+	}
+	return nil
+}
+
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func hmacSHA256(key []byte, data string) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(data))
+	return mac.Sum(nil)
+}
+
+// azureBlobArchiver grava via Put Blob (REST) assinado com Shared Key — sem
+// SDK, mesmo espírito do s3Archiver acima.
+type azureBlobArchiver struct {
+	account, container, accountKey, endpoint string
+}
+
+func (a azureBlobArchiver) Save(ctx context.Context, key string, data []byte) error {
+	keyBytes, err := base64.StdEncoding.DecodeString(a.accountKey)
+	if err != nil { return fmt.Errorf("account_key inválida (esperado base64): %w", err) }
+
+	now := time.Now().UTC().Format(http.TimeFormat)
+	// CanonicalizedResource é "/{account}/{container}/{blob}" contra o Azure
+	// real, mas o nome da conta aparece DUAS vezes contra o emulador/endpoint
+	// path-style (Azurite) — caso documentado explicitamente pela Microsoft
+	// ("If you are authorizing against the storage emulator, the account
+	// name will appear twice in the CanonicalizedResource string").
+	resourcePath := fmt.Sprintf("/%s/%s/%s", a.account, a.container, key)
+	reqURL := fmt.Sprintf("https://%s.blob.core.windows.net/%s/%s", a.account, a.container, escapeObjectKeyPath(key))
+	if a.endpoint != "" {
+		resourcePath = fmt.Sprintf("/%s%s", a.account, resourcePath)
+		reqURL = fmt.Sprintf("%s/%s/%s/%s", strings.TrimSuffix(a.endpoint, "/"), a.account, a.container, escapeObjectKeyPath(key))
+	}
+
+	canonicalizedHeaders := fmt.Sprintf("x-ms-blob-type:BlockBlob\nx-ms-date:%s\nx-ms-version:2021-08-06\n", now)
+
+	// Shared Key string-to-sign: 12 campos separados por \n, seguidos direto
+	// pelos headers canonicalizados (que já terminam em \n) + o resource path.
+	stringToSign := strings.Join([]string{
+		"PUT",                       // Verb
+		"",                          // Content-Encoding
+		"",                          // Content-Language
+		strconv.Itoa(len(data)),     // Content-Length
+		"",                          // Content-MD5
+		"application/octet-stream",  // Content-Type
+		"",                          // Date (usamos x-ms-date em vez disso)
+		"",                          // If-Modified-Since
+		"",                          // If-Match
+		"",                          // If-None-Match
+		"",                          // If-Unmodified-Since
+		"",                          // Range
+		canonicalizedHeaders + resourcePath,
+	}, "\n")
+
+	mac := hmac.New(sha256.New, keyBytes)
+	mac.Write([]byte(stringToSign))
+	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	authHeader := fmt.Sprintf("SharedKey %s:%s", a.account, signature)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data))
+	if err != nil { return err }
+	req.Header.Set("x-ms-blob-type", "BlockBlob")
+	req.Header.Set("x-ms-date", now)
+	req.Header.Set("x-ms-version", "2021-08-06")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	req.Header.Set("Authorization", authHeader)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("azure blob PUT %s: status %d", key, resp.StatusCode)
+	}
+	return nil
 }
 
 func newSessionID() string {
@@ -5746,6 +6133,127 @@ func handleCostConfigRouter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── Arquivamento frio de histórico — endpoints ─────────────────────────────────
+
+// handleArchiveConfigRouter segue o mesmo esqueleto de handleCostConfigRouter,
+// mas devolve/recebe um `cleanup_interval_hours` junto — o valor é sempre o
+// global (lido/gravado na linha cluster=''), independente de qual cluster
+// está sendo consultado, pra o frontend não precisar de uma chamada separada.
+func handleArchiveConfigRouter(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cluster := r.URL.Query().Get("cluster")
+		cfg := getArchiveConfig(cluster)
+		cfgJSON, _ := json.Marshal(cfg.Config)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"cluster": cfg.Cluster, "retention_days": cfg.RetentionDays, "backend_type": cfg.BackendType,
+			"config": maskArchiveConfig(string(cfgJSON)),
+			"cleanup_interval_hours": int(getGlobalCleanupInterval().Hours()),
+		})
+	case http.MethodPost:
+		if db == nil {
+			http.Error(w, "banco não configurado", 400)
+			return
+		}
+		var body struct {
+			Cluster              string            `json:"cluster"`
+			RetentionDays        int               `json:"retention_days"`
+			CleanupIntervalHours int               `json:"cleanup_interval_hours"`
+			BackendType          string            `json:"backend_type"`
+			Config               map[string]string `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "payload inválido", 400)
+			return
+		}
+		if body.RetentionDays != 7 && body.RetentionDays != 15 && body.RetentionDays != 30 {
+			http.Error(w, "retention_days precisa ser 7, 15 ou 30", 400)
+			return
+		}
+		if body.CleanupIntervalHours != 6 && body.CleanupIntervalHours != 12 {
+			http.Error(w, "cleanup_interval_hours precisa ser 6 ou 12", 400)
+			return
+		}
+		if body.BackendType == "" { body.BackendType = "none" }
+		if body.Config == nil { body.Config = map[string]string{} }
+
+		var existingCfgJSON string
+		db.QueryRow(`SELECT config FROM archive_config WHERE cluster=$1`, body.Cluster).Scan(&existingCfgJSON)
+		merged := mergeArchiveSecrets(existingCfgJSON, body.Config)
+		mergedJSON, _ := json.Marshal(merged)
+
+		_, err := db.Exec(`INSERT INTO archive_config (cluster, retention_days, cleanup_interval_hours, backend_type, config)
+			VALUES ($1,$2,$3,$4,$5) ON CONFLICT(cluster) DO UPDATE SET retention_days=EXCLUDED.retention_days,
+			cleanup_interval_hours=EXCLUDED.cleanup_interval_hours, backend_type=EXCLUDED.backend_type, config=EXCLUDED.config`,
+			body.Cluster, body.RetentionDays, body.CleanupIntervalHours, body.BackendType, string(mergedJSON))
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		claims := r.Context().Value(claimsCtxKey).(*TokenClaims)
+		auditLog(claims.Username, claims.Role, "archive_config_save",
+			fmt.Sprintf("cluster=%s retention_days=%d backend_type=%s", body.Cluster, body.RetentionDays, body.BackendType),
+			r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	default:
+		http.Error(w, "Method Not Allowed", 405)
+	}
+}
+
+// handleArchiveConfigTest grava um objeto pequeno de teste no backend
+// configurado, pra validar credencial sem esperar o próximo ciclo de limpeza
+// — mesmo espírito de handleWebhookTest.
+func handleArchiveConfigTest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Cluster     string            `json:"cluster"`
+		BackendType string            `json:"backend_type"`
+		Config      map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "payload inválido", 400)
+		return
+	}
+	if db != nil {
+		var existingCfgJSON string
+		db.QueryRow(`SELECT config FROM archive_config WHERE cluster=$1`, body.Cluster).Scan(&existingCfgJSON)
+		body.Config = mergeArchiveSecrets(existingCfgJSON, body.Config)
+	}
+	archiver, err := newArchiver(ArchiveConfig{Cluster: body.Cluster, BackendType: body.BackendType, Config: body.Config})
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	testKey := fmt.Sprintf("pod-monitor-history/%s/_test-%d.txt", body.Cluster, time.Now().Unix())
+	if err := archiver.Save(r.Context(), testKey, []byte("Teste de arquivamento do Pod Monitor — pode apagar.")); err != nil {
+		http.Error(w, fmt.Sprintf("Erro ao gravar: %v", err), 502)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "key": testKey})
+}
+
+// handleArchiveConfigRunNow dispara a limpeza/arquivamento de um cluster na
+// hora, sem esperar o intervalo configurado — pra validar depois de mexer na
+// config, ou pra forçar em caso de backlog.
+func handleArchiveConfigRunNow(w http.ResponseWriter, r *http.Request) {
+	cluster := r.URL.Query().Get("cluster")
+	if cluster == "" {
+		http.Error(w, "cluster obrigatório", 400)
+		return
+	}
+	if db == nil {
+		http.Error(w, "banco não configurado", 400)
+		return
+	}
+	cleanupCluster(cluster)
+	claims := r.Context().Value(claimsCtxKey).(*TokenClaims)
+	auditLog(claims.Username, claims.Role, "archive_config_run_now", fmt.Sprintf("cluster=%s", cluster), r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
 // ── Notas por namespace ─────────────────────────────────────────────────────
 
 type NamespaceNote struct {
@@ -6559,6 +7067,9 @@ func main() {
 	register("/api/thresholds",        adminOnly(handleThresholdsRouter))
 	register("/api/costs",              readerOrAdminOnly(handleCosts))
 	register("/api/admin/cost-config",  adminOnly(handleCostConfigRouter))
+	register("/api/admin/archive-config",          adminOnly(handleArchiveConfigRouter))
+	register("/api/admin/archive-config/test",     adminOnly(handleArchiveConfigTest))
+	register("/api/admin/archive-config/run-now",  adminOnly(handleArchiveConfigRunNow))
 	register("/api/namespace-notes",    authMiddleware(handleNamespaceNotesRouter))
 	register("/api/webhooks",          adminOnly(handleWebhooksRouter))
 	register("/api/webhooks/test",     adminOnly(handleWebhookTest))

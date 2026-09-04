@@ -32,6 +32,15 @@ spec:
           secret:
             secretName: pod-monitor-kubeconfig
             optional: true
+        # ── Arquivamento frio do Histórico (opcional) ───────────────────────────
+        # Só necessário pra usar o backend NFS em Admin > Retenção e Arquivamento
+        # (S3/Azure Blob não precisam de volume, só credencial). O caminho de
+        # montagem é fixo em /mnt/pod-monitor-archive (constante no backend) —
+        # descomente e ajuste server/path pro seu export NFS:
+        # - name: archive-nfs
+        #   nfs:
+        #     server: nfs.example.com
+        #     path: /exports/pod-monitor-archive
       containers:
         # ── Container principal ──────────────────────────────────────────────
         - name: backend
@@ -64,6 +73,8 @@ spec:
             - name: kubeconfig
               mountPath: /etc/kubeconfig
               readOnly: true
+            # - name: archive-nfs
+            #   mountPath: /mnt/pod-monitor-archive
           resources:
             requests:
               cpu: 100m

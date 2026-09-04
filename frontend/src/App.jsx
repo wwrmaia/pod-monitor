@@ -3222,6 +3222,7 @@ export default function App() {
         loadWebhooks()
         loadThresholds()
         loadCostConfig()
+        loadArchiveConfig()
         fetchAudit()
       }
     }
@@ -3885,6 +3886,62 @@ export default function App() {
     } catch (err) {
       setCostMsg({ type: 'error', text: err.response?.data || t('costsError') })
     } finally { setCostLoad(false) }
+  }
+
+  // arquivamento frio do histórico (retenção + NFS/S3/Azure Blob)
+  // cluster='' segue a mesma convenção de thrForm: linha global/default.
+  // cleanup_interval_hours só é aplicado de fato quando cluster==='' — o loop
+  // de limpeza é único pro processo, não por cluster.
+  const archFormDefault = { cluster: '', retention_days: 7, cleanup_interval_hours: 6, backend_type: 'none', config: {} }
+  const [archForm, setArchForm] = useState(archFormDefault)
+  const [archLoad, setArchLoad] = useState(false)
+  const [archMsg,  setArchMsg]  = useState({ type: '', text: '' })
+  const [archTestLoad, setArchTestLoad] = useState(false)
+  const [archRunLoad,  setArchRunLoad]  = useState(false)
+
+  function setArchConfigField(key, value) {
+    setArchForm(f => ({ ...f, config: { ...f.config, [key]: value } }))
+  }
+
+  async function loadArchiveConfig(cluster = '') {
+    try {
+      const { data } = await axios.get('/api/admin/archive-config', { params: { cluster } })
+      setArchForm({
+        cluster: data.cluster || '', retention_days: data.retention_days || 7,
+        cleanup_interval_hours: data.cleanup_interval_hours || 6,
+        backend_type: data.backend_type || 'none', config: data.config || {},
+      })
+    } catch {}
+  }
+
+  async function saveArchiveConfig() {
+    setArchLoad(true); setArchMsg({ type: '', text: '' })
+    try {
+      await axios.post('/api/admin/archive-config', archForm)
+      setArchMsg({ type: 'ok', text: t('archiveSaved') })
+    } catch (err) {
+      setArchMsg({ type: 'error', text: err.response?.data || t('archiveError') })
+    } finally { setArchLoad(false) }
+  }
+
+  async function testArchiveConfig() {
+    setArchTestLoad(true); setArchMsg({ type: '', text: '' })
+    try {
+      const { data } = await axios.post('/api/admin/archive-config/test', archForm)
+      setArchMsg({ type: 'ok', text: t('archiveTestOk')(data.key) })
+    } catch (err) {
+      setArchMsg({ type: 'error', text: err.response?.data || t('archiveError') })
+    } finally { setArchTestLoad(false) }
+  }
+
+  async function runArchiveNow() {
+    setArchRunLoad(true); setArchMsg({ type: '', text: '' })
+    try {
+      await axios.post('/api/admin/archive-config/run-now', null, { params: { cluster: archForm.cluster } })
+      setArchMsg({ type: 'ok', text: t('archiveRunNowOk') })
+    } catch (err) {
+      setArchMsg({ type: 'error', text: err.response?.data || t('archiveError') })
+    } finally { setArchRunLoad(false) }
   }
 
   // session timeout warning
@@ -5473,6 +5530,129 @@ export default function App() {
                 <button className='admin-btn' onClick={saveCostConfig} disabled={costLoad}>
                   {costLoad ? t('costsSaving') : t('costsSave')}
                 </button>
+              </div>
+            </div>
+
+            {/* Retenção e Arquivamento do Histórico */}
+            <div className='admin-step active' style={{ marginBottom: '1.5rem' }}>
+              <div className='admin-step-title'>{t('archiveTitle')}</div>
+              <div className='admin-step-body'>
+                <p style={{ color: 'var(--text-3)', fontSize: 12, marginBottom: '1rem' }}>{t('archiveSubtitle')}</p>
+                {archMsg.text && <div className={`admin-msg ${archMsg.type}`} style={{ marginBottom: '1rem' }}>{archMsg.text}</div>}
+                <div className='admin-fields'>
+                  <div className='admin-field'>
+                    <label>{t('archiveCluster')}</label>
+                    <input type='text' placeholder={t('thresholdGlobal')} value={archForm.cluster}
+                      onChange={e => setArchForm(f => ({ ...f, cluster: e.target.value }))} />
+                  </div>
+                  <div className='admin-field' style={{ width: 90, alignSelf: 'flex-end' }}>
+                    <button className='admin-link' onClick={() => loadArchiveConfig(archForm.cluster)}>{t('archiveLoad')}</button>
+                  </div>
+                  <div className='admin-field' style={{ width: 110 }}>
+                    <label>{t('archiveRetention')}</label>
+                    <select value={archForm.retention_days} onChange={e => setArchForm(f => ({ ...f, retention_days: +e.target.value }))}>
+                      <option value={7}>7 {t('archiveDays')}</option>
+                      <option value={15}>15 {t('archiveDays')}</option>
+                      <option value={30}>30 {t('archiveDays')}</option>
+                    </select>
+                  </div>
+                  <div className='admin-field' style={{ width: 150 }}>
+                    <label>{t('archiveInterval')}</label>
+                    <select value={archForm.cleanup_interval_hours} onChange={e => setArchForm(f => ({ ...f, cleanup_interval_hours: +e.target.value }))}>
+                      <option value={6}>6h</option>
+                      <option value={12}>12h</option>
+                    </select>
+                  </div>
+                  <div className='admin-field' style={{ width: 150 }}>
+                    <label>{t('archiveBackend')}</label>
+                    <select value={archForm.backend_type} onChange={e => setArchForm(f => ({ ...f, backend_type: e.target.value }))}>
+                      <option value='none'>{t('archiveBackendNone')}</option>
+                      <option value='nfs'>NFS</option>
+                      <option value='s3'>S3</option>
+                      <option value='azure_blob'>Azure Blob</option>
+                    </select>
+                  </div>
+                </div>
+                {archForm.cluster === '' && (
+                  <p style={{ color: 'var(--text-3)', fontSize: 11, marginTop: -8, marginBottom: '1rem' }}>{t('archiveIntervalHint')}</p>
+                )}
+                <div className='admin-fields'>
+                  {archForm.backend_type === 'nfs' && (
+                    <div className='admin-field'>
+                      <label>{t('archiveNfsPath')}</label>
+                      <input type='text' placeholder='historico/producao' value={archForm.config.path || ''}
+                        onChange={e => setArchConfigField('path', e.target.value)} />
+                    </div>
+                  )}
+                  {archForm.backend_type === 's3' && (
+                    <>
+                      <div className='admin-field'>
+                        <label>{t('archiveS3Bucket')}</label>
+                        <input type='text' value={archForm.config.bucket || ''}
+                          onChange={e => setArchConfigField('bucket', e.target.value)} />
+                      </div>
+                      <div className='admin-field' style={{ width: 110 }}>
+                        <label>{t('archiveS3Region')}</label>
+                        <input type='text' placeholder='us-east-1' value={archForm.config.region || ''}
+                          onChange={e => setArchConfigField('region', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveS3Endpoint')}</label>
+                        <input type='text' placeholder={t('archiveS3EndpointPlaceholder')} value={archForm.config.endpoint || ''}
+                          onChange={e => setArchConfigField('endpoint', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveS3AccessKey')}</label>
+                        <input type='text' value={archForm.config.access_key_id || ''}
+                          onChange={e => setArchConfigField('access_key_id', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveS3SecretKey')}</label>
+                        <input type='password' value={archForm.config.secret_access_key || ''}
+                          onChange={e => setArchConfigField('secret_access_key', e.target.value)} />
+                      </div>
+                    </>
+                  )}
+                  {archForm.backend_type === 'azure_blob' && (
+                    <>
+                      <div className='admin-field'>
+                        <label>{t('archiveAzureAccount')}</label>
+                        <input type='text' value={archForm.config.account_name || ''}
+                          onChange={e => setArchConfigField('account_name', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveAzureContainer')}</label>
+                        <input type='text' value={archForm.config.container || ''}
+                          onChange={e => setArchConfigField('container', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveAzureKey')}</label>
+                        <input type='password' value={archForm.config.account_key || ''}
+                          onChange={e => setArchConfigField('account_key', e.target.value)} />
+                      </div>
+                      <div className='admin-field'>
+                        <label>{t('archiveS3Endpoint')}</label>
+                        <input type='text' placeholder={t('archiveAzureEndpointPlaceholder')} value={archForm.config.endpoint || ''}
+                          onChange={e => setArchConfigField('endpoint', e.target.value)} />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className='admin-btn' onClick={saveArchiveConfig} disabled={archLoad}>
+                    {archLoad ? t('archiveSaving') : t('archiveSave')}
+                  </button>
+                  {archForm.backend_type !== 'none' && (
+                    <button className='admin-link' onClick={testArchiveConfig} disabled={archTestLoad}>
+                      {archTestLoad ? t('archiveTesting') : t('archiveTest')}
+                    </button>
+                  )}
+                  {archForm.cluster !== '' && (
+                    <button className='admin-link' onClick={runArchiveNow} disabled={archRunLoad}>
+                      {archRunLoad ? t('archiveRunning') : t('archiveRunNow')}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

@@ -84,6 +84,17 @@ backend:
           cpu: 50m
           memory: 32Mi
 
+  # NFS mount for cold archival of expiring History rows (optional — see
+  # Admin > Retention & Archiving in the UI for the S3/Azure Blob backends,
+  # which need no volume, only credentials).
+  # The in-pod mount path is fixed at /mnt/pod-monitor-archive (matches a
+  # compile-time constant in the backend) — only server/path are configurable.
+  # The subdirectory inside the share is chosen per-cluster from the Admin UI.
+  archiveNFS:
+    enabled: false
+    server: ""   # e.g. "nfs.example.com"
+    path: ""     # e.g. "/exports/pod-monitor-archive"
+
   resources:
     requests:
       cpu: 100m

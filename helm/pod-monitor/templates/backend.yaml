@@ -26,12 +26,20 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext.backend | nindent 8 }}
       {{- end }}
-      {{- if .Values.backend.docker.enabled }}
+      {{- if or .Values.backend.docker.enabled .Values.backend.archiveNFS.enabled }}
       volumes:
+        {{- if .Values.backend.docker.enabled }}
         {{- range .Values.backend.docker.sockets }}
         - name: {{ .name }}
           hostPath:
             path: {{ .hostPath }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.backend.archiveNFS.enabled }}
+        - name: archive-nfs
+          nfs:
+            server: {{ .Values.backend.archiveNFS.server }}
+            path: {{ .Values.backend.archiveNFS.path }}
         {{- end }}
       {{- end }}
       containers:
@@ -76,12 +84,19 @@ spec:
             {{- with .Values.backend.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if and .Values.backend.docker.enabled (not $useSocketProxy) }}
+          {{- if or (and .Values.backend.docker.enabled (not $useSocketProxy)) .Values.backend.archiveNFS.enabled }}
           volumeMounts:
+            {{- if and .Values.backend.docker.enabled (not $useSocketProxy) }}
             {{- /* Sem socket proxy: monta sockets diretamente no backend (não recomendado) */ -}}
             {{- range .Values.backend.docker.sockets }}
             - name: {{ .name }}
               mountPath: {{ .mountPath }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.backend.archiveNFS.enabled }}
+            {{/* Caminho fixo — precisa bater com a constante nfsArchiveMountPath no backend (main.go) */}}
+            - name: archive-nfs
+              mountPath: /mnt/pod-monitor-archive
             {{- end }}
           {{- end }}
           resources:
